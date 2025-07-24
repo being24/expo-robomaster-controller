@@ -1,0 +1,7 @@
+{
+    "configuration": "PSRAM=enabled,PartitionScheme=default_8MB,CPUFreq=240,FlashMode=qio,FlashFreq=80,FlashSize=8M,UploadSpeed=1500000,LoopCore=1,EventsCore=1,DebugLevel=none,EraseFlash=none",
+    "board": "esp32:esp32:m5stack_stickc_plus2",
+    "port": "COM4",
+    "sketch": "expo-robomaster-controller.ino",
+    "output": "./Build"
+}

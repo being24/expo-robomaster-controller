@@ -8,4 +8,7 @@ doc/
 debug.txt
 .ycm_extra_conf.pyc
 .ropeproject
-.vscode/
+# .vscode/
+wifi_config.h
+.vscode/c_cpp_properties.json
+.vscode/settings.json

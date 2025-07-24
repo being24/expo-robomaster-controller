@@ -1,0 +1,11 @@
+## Library
+ESP32-Arduino-CAN
+
+```sh
+arduino-cli config set library.enable_unsafe_install true
+```
+
+```sh
+ESP32-TWAI-CAN
+ArduinoJson
+```
