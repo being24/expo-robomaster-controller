@@ -1,0 +1,68 @@
+#include <SPI.h>
+
+#include "mcp2515_can.h"
+
+const int SPI_CS_PIN = 9;  // CS引脚
+mcp2515_can CAN(SPI_CS_PIN);
+
+const int16_t MAX_VOLTAGE = 10000;  // 峰值
+const int ACC_TIME = 8000;          // 加速时间，ms
+const int DEC_TIME = 20000;         // 减速时间，ms
+const int STOP_TIME = 10000;        // 停止时间，ms
+const int PERIOD = ACC_TIME + DEC_TIME + STOP_TIME;
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial);
+  while (CAN_OK != CAN.begin(CAN_1000KBPS, MCP_16MHz)) {
+    Serial.println("CAN init fail, retry...");
+    delay(100);
+  }
+  Serial.println("CAN BUS Shield init ok!");
+  Serial.println("in_voltage,angle,speed,torque,temp");
+}
+
+void loop() {
+  unsigned long now = millis();
+  unsigned long t = now % PERIOD;  // 用全局时钟周期性递推
+  int16_t voltage = 0;
+
+  if (t < ACC_TIME) {
+    voltage = MAX_VOLTAGE * t / ACC_TIME;  // 线性加速
+  } else if (t < ACC_TIME + DEC_TIME) {
+    voltage = MAX_VOLTAGE * (ACC_TIME + DEC_TIME - t) / DEC_TIME;  // 线性减速
+  }  // 停止阶段voltage自动为0
+
+  // 高频发包
+  static unsigned long lastSend = 0;
+  if (now - lastSend > 20) {
+    lastSend = now;
+    byte data[8] = {0};
+    data[0] = (voltage >> 8) & 0xFF;
+    data[1] = voltage & 0xFF;
+    CAN.sendMsgBuf(0x1FF, 0, 8, data);
+  }
+
+  // 读取反馈并csv格式输出
+  unsigned char len = 0;
+  unsigned char rxBuf[8];
+  if (CAN.checkReceive() == CAN_MSGAVAIL) {
+    CAN.readMsgBuf(&len, rxBuf);
+    long unsigned int rxId = CAN.getCanId();
+    if (rxId == 0x205) {
+      uint16_t mech_angle = (rxBuf[0] << 8) | rxBuf[1];
+      int16_t speed = (rxBuf[2] << 8) | rxBuf[3];
+      int16_t torque = (rxBuf[4] << 8) | rxBuf[5];
+      uint8_t temp = rxBuf[6];
+      Serial.print(voltage);
+      Serial.print(",");
+      Serial.print(mech_angle);
+      Serial.print(",");
+      Serial.print(speed);
+      Serial.print(",");
+      Serial.print(torque);
+      Serial.print(",");
+      Serial.println(temp);
+    }
+  }
+}

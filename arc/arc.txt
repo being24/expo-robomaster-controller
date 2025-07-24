@@ -1,0 +1,121 @@
+#include<M5StickCPlus2.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <Wire.h>
+
+// 開発中はシリアルポートでのデバッグ出力を有効にすることをお勧めします
+#define DEBUG_SERIAL
+// 画面表示も有効にしておくと、本体だけで値を確認できて便利です
+#define ENABLE_DISPLAY
+
+    // --- WiFi & UDP 設定 ---
+    // ご自身の環境に合わせて、この部分のコメントを付け替えてください
+    const char* SSID = "瞳Phone15";
+const char* PASSWORD = "airiphone";
+const char* UDP_ADDR = "172.20.10.3";  // Unityを実行するPCのIPアドレス
+const uint16_t UDP_PORT = 8887;
+
+WiFiUDP udp;
+
+// 画面のON/OFF状態を記憶する変数
+bool isDisplayOn = true;
+
+void setup() {
+#ifdef DEBUG_SERIAL
+  Serial.begin(115200);
+  Serial.println("Setup start");
+#endif
+
+  // M5StickC Plus 2 の初期化
+  M5.begin();
+  M5.Lcd.setRotation(3);
+  M5.Lcd.setTextSize(2);
+  M5.Lcd.setTextColor(WHITE, BLACK);
+
+  // 起動時に画面をON（輝度を100）に設定
+  M5.Lcd.setBrightness(100);
+
+  // WiFi 接続
+  WiFi.begin(SSID, PASSWORD);
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.println("Connecting WiFi...");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+#ifdef DEBUG_SERIAL
+    Serial.print(".");
+#endif
+  }
+#ifdef DEBUG_SERIAL
+  Serial.println("\nWiFi connected");
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());
+#endif
+
+#ifdef ENABLE_DISPLAY
+  M5.Lcd.fillScreen(BLACK);
+  M5.Lcd.setCursor(0, 0);
+  M5.Lcd.println("WiFi Connected!");
+  M5.Lcd.println(WiFi.localIP());
+  delay(2000);  // 2秒待ってからループ開始
+#endif
+}
+
+void loop() {
+  M5.update();  // ボタン状態の更新に必須
+
+  // 正面のボタン(BtnA)が押されたかチェック
+  if (M5.BtnA.wasPressed()) {
+    isDisplayOn = !isDisplayOn;  // ON/OFFの状態を反転させる
+
+    if (isDisplayOn) {
+      // 画面をONにする (輝度を100%に)
+      M5.Lcd.setBrightness(100);
+    } else {
+      // 画面をOFFにする (輝度を0%に)
+      M5.Lcd.setBrightness(0);
+    }
+  }
+
+  // --- センサーデータの読み取り ---
+  float ax, ay, az;  // 加速度 (単位: G)
+  float gx, gy, gz;  // 角速度 (単位: dps, degrees per second)
+
+  // 1. 加速度を取得
+  M5.Imu.getAccel(&ax, &ay, &az);
+
+  // 2. 角速度を取得
+  M5.Imu.getGyro(&gx, &gy, &gz);
+
+#ifdef DEBUG_SERIAL
+  // シリアルポートに加速度と角速度を出力
+  Serial.printf("Accel: x=%.2f y=%.2f z=%.2f | Gyro: x=%.2f y=%.2f z=%.2f\n",
+                ax, ay, az, gx, gy, gz);
+#endif
+
+// 画面がONの時だけ、描画処理を行う
+#ifdef ENABLE_DISPLAY
+  if (isDisplayOn) {
+    M5.Lcd.fillScreen(BLACK);
+    M5.Lcd.setCursor(0, 0);
+    M5.Lcd.printf("Ax:%.2f Ay:%.2f\nAz:%.2f\n", ax, ay, az);
+    M5.Lcd.printf("Gx:%.1f Gy:%.1f\n", gx, gy);
+    M5.Lcd.printf("Gz:%.1f\n", gz);
+  }
+#endif
+
+  // --- JSON生成 ---
+  String json = "{\"Accel\":{\"x\":" + String(ax, 4) +
+                ",\"y\":" + String(ay, 4) + ",\"z\":" + String(az, 4) + "}," +
+                "\"AngVel\":{\"x\":" + String(gx, 4) +
+                ",\"y\":" + String(gy, 4) + ",\"z\":" + String(gz, 4) + "}," +
+                // YawRotはMPU6886単体では直接取得できないため、0.0として送信
+                "\"YawRot\":0.0}";
+
+  // UDPでUnityに送信
+  udp.beginPacket(UDP_ADDR, UDP_PORT);
+  udp.print(json);
+  udp.endPacket();
+
+  delay(100);  // 0.1秒に一回送信
+}

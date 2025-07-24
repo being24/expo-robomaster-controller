@@ -1,0 +1,239 @@
+#include <ArduinoJson.h>
+#include <M5Unified.h>
+#include <SPI.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <mcp2515.h>
+
+// WiFi設定
+const char* ssid = "HR01a-FEE321";    // WiFi SSID
+const char* password = "a4dc520d52";  // WiFiパスワード
+
+// UDP設定
+WiFiUDP udp;
+const char* udpAddress = "192.168.1.129";  // 送信先IPアドレス
+const int udpPort = 12346;                 // 送信先ポート
+
+// シリアルデバッグ用
+#define DEBUG_SERIAL
+
+// CANモジュールの設定
+struct can_frame canMsg;
+MCP2515 mcp2515(10);
+
+void setup() {
+#ifdef DEBUG_SERIAL
+  Serial.begin(115200);
+#endif
+  M5.begin();
+
+  // IMU初期化
+  auto imu_type = M5.Imu.begin();
+#ifdef DEBUG_SERIAL
+  if (imu_type == m5::imu_t::imu_unknown) {
+    Serial.println("IMU初期化失敗");
+  } else {
+    Serial.println("IMU初期化成功");
+  }
+#endif
+
+  // CANの初期化
+  mcp2515.reset();
+  mcp2515.setBitrate(CAN_1000KBPS);
+  mcp2515.setNormalMode();
+
+  randomSeed(analogRead(0));  // ランダムシードを設定
+
+  // WiFiスキャン実行
+#ifdef DEBUG_SERIAL
+  Serial.println("WiFiネットワークをスキャン中...");
+#endif
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(1000);
+
+  int n = WiFi.scanNetworks();
+#ifdef DEBUG_SERIAL
+  Serial.println("スキャン完了");
+#endif
+
+  if (n == 0) {
+#ifdef DEBUG_SERIAL
+    Serial.println("ネットワークが見つかりませんでした");
+#endif
+  } else {
+#ifdef DEBUG_SERIAL
+    Serial.print(n);
+    Serial.println(" 個のネットワークが見つかりました:");
+    Serial.println("-----------------------------------");
+    for (int i = 0; i < n; ++i) {
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(" dBm) ");
+      Serial.print((WiFi.encryptionType(i) == WIFI_AUTH_OPEN) ? "オープン"
+                                                              : "暗号化");
+      Serial.println();
+      delay(10);
+    }
+    Serial.println("-----------------------------------");
+#endif
+  }
+
+  // WiFi接続詳細デバッグ
+#ifdef DEBUG_SERIAL
+  Serial.println("WiFi接続開始...");
+  Serial.print("SSID: ");
+  Serial.println(ssid);
+  Serial.print("パスワード長: ");
+  Serial.println(strlen(password));
+#endif
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(1000);
+#ifdef DEBUG_SERIAL
+    Serial.print("接続試行 ");
+    Serial.print(attempts + 1);
+    Serial.print("/20 - 状態: ");
+
+    switch (WiFi.status()) {
+      case WL_IDLE_STATUS:
+        Serial.println("IDLE");
+        break;
+      case WL_NO_SSID_AVAIL:
+        Serial.println("SSID not found");
+        break;
+      case WL_SCAN_COMPLETED:
+        Serial.println("Scan completed");
+        break;
+      case WL_CONNECTED:
+        Serial.println("Connected");
+        break;
+      case WL_CONNECT_FAILED:
+        Serial.println("Connect failed");
+        break;
+      case WL_CONNECTION_LOST:
+        Serial.println("Connection lost");
+        break;
+      case WL_DISCONNECTED:
+        Serial.println("Disconnected");
+        break;
+      default:
+        Serial.println("Unknown");
+        break;
+    }
+#endif
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+#ifdef DEBUG_SERIAL
+    Serial.println("WiFi接続成功!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("RSSI: ");
+    Serial.println(WiFi.RSSI());
+#endif
+
+    // UDP開始
+    udp.begin(udpPort);
+#ifdef DEBUG_SERIAL
+    Serial.print("UDP開始 - ポート: ");
+    Serial.println(udpPort);
+#endif
+  } else {
+#ifdef DEBUG_SERIAL
+    Serial.println("WiFi接続失敗! オフラインモードで動作します");
+#endif
+  }
+}
+
+void loop() {
+  // IMUデータを取得
+  auto imu_type = M5.Imu.getType();
+
+  if (imu_type != m5::imu_t::imu_unknown) {
+    float ax, ay, az;
+    float gx, gy, gz;
+
+    // 加速度データ取得
+    M5.Imu.getAccel(&ax, &ay, &az);
+
+    // ジャイロデータ取得
+    M5.Imu.getGyro(&gx, &gy, &gz);
+
+    // ArduinoJsonを使ってJSON作成
+    StaticJsonDocument<1024> doc;
+
+    // Accelオブジェクト作成
+    JsonObject accel = doc.createNestedObject("Accel");
+    accel["x"] = serialized(String(ax, 4));
+    accel["y"] = serialized(String(ay, 4));
+    accel["z"] = serialized(String(az, 4));
+
+    // AngVelオブジェクト作成
+    JsonObject angvel = doc.createNestedObject("AngVel");
+    angvel["x"] = serialized(String(gx, 4));
+    angvel["y"] = serialized(String(gy, 4));
+    angvel["z"] = serialized(String(gz, 4));
+
+    // YawRotは固定値
+    doc["YawRot"] = 0.0;
+
+    // MotorDataオブジェクト作成
+    JsonObject motor_data = doc.createNestedObject("MotorData");
+    motor_data["can_id"] = "0x205";
+    motor_data["angle_raw"] = random(2048, 6145);  // 2048-6144の範囲
+    motor_data["angle_deg"] =
+        serialized(String(random(900, 2701) / 10.0, 1));  // 90.0-270.0度
+    motor_data["speed_rpm"] = random(60, 181);            // 60-180rpm
+    motor_data["current_raw"] = random(6144, 10241);      // 6144-10240
+    motor_data["current_a"] =
+        serialized(String(random(10, 21) / 10.0, 1));  // 1.0-2.0A
+    motor_data["torque_nm"] =
+        serialized(String(random(8000, 14001) / 10000.0, 4));  // 0.8-1.4Nm
+    motor_data["temperature_c"] = random(35, 51);              // 35-50度
+
+    // JSON文字列に変換
+    String json;
+    serializeJson(doc, json);
+
+    // JSONをシリアル出力
+#ifdef DEBUG_SERIAL
+    Serial.println(json);
+#endif
+
+    // CANメッセージを読み取る
+    if (mcp2515.readMessage(&canMsg) == MCP2515::ERROR_OK) {
+      Serial.print(canMsg.can_id, HEX);  // print ID
+      Serial.print(" ");
+      Serial.print(canMsg.can_dlc, HEX);  // print DLC
+      Serial.print(" ");
+
+      for (int i = 0; i < canMsg.can_dlc; i++) {  // print the data
+        Serial.print(canMsg.data[i], HEX);
+        Serial.print(" ");
+      }
+      Serial.println();
+      Serial.println();
+
+      // UDP送信（WiFi接続時のみ）
+      if (WiFi.status() == WL_CONNECTED) {
+        udp.beginPacket(udpAddress, udpPort);
+        udp.print(json);
+        udp.endPacket();
+      }
+    } else {
+#ifdef DEBUG_SERIAL
+      Serial.println("{\"error\":\"IMU not available\"}");
+#endif
+    }
+
+    delay(1000);
+  }
