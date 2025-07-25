@@ -82,9 +82,9 @@ float pid_control(float current_rpm, float target_rpm) {
   if (output > 0.0f && output < 0.5f) output = 0.5f;
   if (output < 0.0f && output > -0.5f) output = -0.5f;
 
-  // 出力制限（±2.5A以内）
-  if (output > 2.5f) output = 2.5f;
-  if (output < -2.5f) output = -2.5f;
+  // 出力制限（±3.0A以内）
+  if (output > 3.0f) output = 3.0f;
+  if (output < -3.0f) output = -3.0f;
 
   // デッドバンドは無効化して様子を見る
   // if (abs(error) < 5.0f) output = 0.0f;
