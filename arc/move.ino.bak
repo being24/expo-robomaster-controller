@@ -1,0 +1,183 @@
+#include <M5StickCPlus2.h>
+
+#include <ESP32-TWAI-CAN.hpp>
+
+#define SERIAL_DEBUG_MODE  // シリアル出力用の出力
+#define DEV_DEBUG_MODE     // 開発用デバッグ出力（受信IDなど）
+
+// Default for M5StickC PLUS2
+#define CAN_TX 32
+#define CAN_RX 33
+
+#define BASE_ID 0x204
+
+// コマンドの送信感覚
+#define COMMAND_SEND_INTERVAL 20  // ms
+#define LOOP_INTERVAL 10
+
+CanFrame rxFrame;
+
+int counter = 0;
+bool data_size_error_flag_ = false;
+
+constexpr int motor_id = 1;
+
+void send_cur(float cur) {
+  constexpr float MAX_CUR_A = 3.0f;       // 最大±3A
+  constexpr int16_t MAX_CUR_VAL = 16384;  // ±16384 = 3A
+  constexpr uint32_t CAN_ID =
+      0x1FF;  // sample.txtと同じ0x1FF（モーターID 1～4 に対応）
+
+  // 電流[A] → 指令値 [-16384, +16384] に変換
+  float scaled = cur * (MAX_CUR_VAL / MAX_CUR_A);
+  if (scaled > MAX_CUR_VAL) scaled = MAX_CUR_VAL;
+  if (scaled < -MAX_CUR_VAL) scaled = -MAX_CUR_VAL;
+  int16_t command = static_cast<int16_t>(scaled);
+
+  // CANフレーム作成
+  CanFrame frame = {0};
+  frame.identifier = CAN_ID;
+  frame.extd = 0;
+  frame.data_length_code = 8;
+
+  // 8バイト初期化（冗長だが明示的に）
+  for (int i = 0; i < 8; i++) frame.data[i] = 0;
+
+  // sample.txtと同じ配置：最初の2バイトに電圧値
+  frame.data[0] = (command >> 8) & 0xFF;  // 上位バイト
+  frame.data[1] = command & 0xFF;         // 下位バイト
+
+  // フレーム送信
+  ESP32Can.writeFrame(frame);
+
+  // CAN送信デバッグ情報を常に表示
+  Serial.print("TX: 0x");
+  Serial.print(frame.identifier, HEX);
+  Serial.print(" Current:");
+  Serial.print(cur);
+  Serial.print("A Cmd:");
+  Serial.print(command);
+  Serial.print(" [");
+  for (int i = 0; i < frame.data_length_code; i++) {
+    if (frame.data[i] < 16) Serial.print("0");
+    Serial.print(frame.data[i], HEX);
+    if (i < frame.data_length_code - 1) Serial.print(" ");
+  }
+  Serial.println("]");
+}
+
+void readIMUData() {
+  // IMU読み取りは削除 - モーター制御のみに集中
+}
+
+void setup() {
+  auto cfg = M5.config();
+  M5.begin(cfg);
+  M5.Display.setRotation(3);
+  M5.Display.setTextFont(&fonts::Orbitron_Light_24);
+  M5.Display.setTextSize(0.5);
+
+  // wait 2 seconds for M5StickC to initialize
+  delay(2000);
+
+  // Setup serial for debugging.
+  Serial.begin(115200);
+  while (!Serial);
+
+  Serial.println("=== RoboMaster Motor CAN Control ===");
+  Serial.println("Simplified version - Motor control only");
+
+  // Set pins
+  ESP32Can.setPins(CAN_TX, CAN_RX);
+
+  // You can set custom size for the queues - those are default
+  ESP32Can.setRxQueueSize(5);
+  ESP32Can.setTxQueueSize(5);
+
+  // .setSpeed() and .begin() functions require to use TwaiSpeed enum,
+  // but you can easily convert it from numerical value using .convertSpeed()
+  ESP32Can.setSpeed(ESP32Can.convertSpeed(1000));
+
+  // Initialize CAN bus
+  if (ESP32Can.begin()) {
+    Serial.println("CAN bus started!");
+    Serial.println("Motor control started - sending 2.5A command every 20ms");
+  } else {
+    Serial.println("CAN bus failed!");
+    while (1);
+  }
+}
+
+void loop() {
+  // モーター制御 - 段階的に電流を変化させてテスト
+  static unsigned long lastMotorCommand = 0;
+  static float test_current = 0.5;  // 0.5Aから開始
+  static unsigned long lastCurrentChange = 0;
+
+  if (millis() - lastMotorCommand >= COMMAND_SEND_INTERVAL) {
+    // 5秒ごとに電流値を変更してテスト
+    if (millis() - lastCurrentChange >= 5000) {
+      test_current += 0.5;
+      if (test_current > 3.0) test_current = 0.5;  // 3.0Aまでテストしてリセット
+      lastCurrentChange = millis();
+      Serial.print(">>> Changing current to: ");
+      Serial.print(test_current);
+      Serial.println("A <<<");
+    }
+
+    send_cur(test_current);  // テスト電流で制御
+    lastMotorCommand = millis();
+  }
+
+  // CAN受信処理
+  if (ESP32Can.readFrame(rxFrame, 1)) {
+    // 受信したすべてのフレームを表示
+    Serial.print("RX: 0x");
+    Serial.print(rxFrame.identifier, HEX);
+    Serial.print(" [");
+    for (int j = 0; j < rxFrame.data_length_code; j++) {
+      if (rxFrame.data[j] < 16) Serial.print("0");
+      Serial.print(rxFrame.data[j], HEX);
+      if (j < rxFrame.data_length_code - 1) Serial.print(" ");
+    }
+    Serial.print("]");
+
+    if (rxFrame.identifier == BASE_ID + motor_id) {  // motor_id=1なので0x205
+      counter++;
+      data_size_error_flag_ = (rxFrame.data_length_code != 8);
+
+      // CANからの生データ取得
+      uint16_t mech_angle = (rxFrame.data[0] << 8) | rxFrame.data[1];
+      int16_t speed = (rxFrame.data[2] << 8) | rxFrame.data[3];
+      int16_t torque = (rxFrame.data[4] << 8) | rxFrame.data[5];
+      uint8_t temp = rxFrame.data[6];
+
+      // 正規化とシリアル出力
+      float angle_deg = mech_angle * 360.0f / 8192.0f;
+      float speed_rpm = speed;
+      float current_A = torque / 2048.0f;
+
+      Serial.print(" MOTOR: Angle=");
+      Serial.print(angle_deg, 1);
+      Serial.print("° Speed=");
+      Serial.print(speed_rpm);
+      Serial.print("rpm Current=");
+      Serial.print(current_A, 3);
+      Serial.print("A Temp=");
+      Serial.print(temp);
+      Serial.print("°C");
+
+      // 回転状態の判定
+      if (speed_rpm != 0) {
+        Serial.print(" *** ROTATING! ***");
+      } else if (abs(current_A) < 0.1) {
+        Serial.print(" *** NO CURRENT FLOW ***");
+      } else {
+        Serial.print(" *** BLOCKED/STALLED ***");
+      }
+    }
+    Serial.println();
+  }
+
+  delay(LOOP_INTERVAL);
+}

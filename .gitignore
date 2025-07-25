@@ -12,3 +12,4 @@ debug.txt
 wifi_config.h
 .vscode/c_cpp_properties.json
 .vscode/settings.json
+Build/
