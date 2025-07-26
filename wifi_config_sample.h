@@ -6,6 +6,7 @@
 const char* WIFI_SSID = "your_wifi_ssid";
 const char* WIFI_PASSWORD = "your_wifi_password";
 const char* UDP_TARGET_IP = "192.168.1.100";  // 送信先のIPアドレス
-const uint16_t UDP_PORT = 8887;
+const uint16_t POST_UDP_PORT = 8888;          // 送信ポート（UDP）
+const uint16_t RECEIVE_UDP_PORT = 8887;       // 受信ポート（UDP）
 
 #endif

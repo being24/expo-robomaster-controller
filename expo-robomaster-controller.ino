@@ -9,7 +9,8 @@
 
 #define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力
 // #define DEV_DEBUG_MODE     // 開発用デバッグ出力（受信IDなど）
-#define WIFI_DEBUG_MODE  // WiFiスキャンとネットワーク情報の表示
+#define WIFI_DEBUG_MODE     // WiFiスキャンとネットワーク情報の表示
+#define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
 
 // Default for M5StickC PLUS2
 #define CAN_TX 32
@@ -24,7 +25,10 @@
 CanFrame rxFrame;
 
 WiFiUDP udp;
+WiFiUDP commandUdp;  // コマンド受信用
 bool wifiConnected = false;
+
+const int RECEIVE_UDP_PORT = 8887;  // コマンド受信ポート
 
 int counter = 0;
 bool data_size_error_flag_ = false;
@@ -36,25 +40,100 @@ float gyroX, gyroY, gyroZ;
 constexpr int motor_id = 1;
 
 // PID制御パラメータ（振動を抑えるために調整）
-float kp = 0.01;  // 比例ゲイン（減少）
-float ki = 0.1;   // 積分ゲイン（減少）
-float kd = 0.0;   // 微分ゲイン（無効化）
+#ifdef NO_LOAD_DEBUG_MODE
+// 負荷なしデバッグモードではPID制御を無効化
+float kp = 0.005;  // 比例ゲイン（無効化）
+float ki = 0.1;    // 積分ゲイン（無効化）
+float kd = 0.0;    // 微分ゲイン（無効化）
+#else
+float kp = 0.01;  // 比例ゲイン
+float ki = 0.1;   // 積分ゲイン
+float kd = 0.0;   // 微分ゲイン
+#endif
 
+// minimum current
+float min_current = 0.5;  // 最小出力しきい値（摩擦を超えるための値）
+
+// 0とみなす
+float zero_threshold = 0.05;
+
+bool is_running = true;    // モーター動作フラグ
+bool is_take = false;      // 取得フラグ
 float target_rpm = 100.0;  // 目標RPM（初期値）
 float integral_error = 0.0;
 float previous_error = 0.0;
 unsigned long last_pid_time = 0;
 
 // 目標RPMの配列（ループで切り替え）
-float target_rpm_sequence[] = {50.0, -50.0, 20.0, -20.0};
-int target_rpm_index = 0;
-const int sequence_length =
-    sizeof(target_rpm_sequence) / sizeof(target_rpm_sequence[0]);
+// float target_rpm_sequence[] = {50.0, -50.0, 20.0, -20.0};
+// int target_rpm_index = 0;
+// const int sequence_length =
+//     sizeof(target_rpm_sequence) / sizeof(target_rpm_sequence[0]);
 
 // json
 StaticJsonDocument<300> doc;
+StaticJsonDocument<200> commandDoc;  // コマンド受信用
+
+void processUdpCommand() {
+  int packetSize = commandUdp.parsePacket();
+  if (packetSize) {
+    char incomingPacket[256];
+    int len = commandUdp.read(incomingPacket, 255);
+    if (len > 0) {
+      incomingPacket[len] = 0;
+
+      // JSONをパース
+      DeserializationError error = deserializeJson(commandDoc, incomingPacket);
+      if (!error) {
+        if (commandDoc.containsKey("speed")) {
+          float speed_rad_s = commandDoc["speed"];
+          // rad/s を RPM に変換 (rad/s * 60 / (2*π) = rad/s * 9.5493)
+          target_rpm = speed_rad_s * 9.5493;
+        }
+
+        // isTakeフラグの制御
+        if (commandDoc.containsKey("isTake")) {
+          is_take = commandDoc["isTake"];
+        }
+
+        // is_runningフラグの制御（最後に処理）
+        if (commandDoc.containsKey("isRunning")) {
+          is_running = commandDoc["isRunning"];
+
+#ifdef SERIAL_DEBUG_MODE
+          static unsigned long lastUdpDebugTime = 0;
+          if (millis() - lastUdpDebugTime >= 1000) {  // 1秒間隔で出力制限
+            Serial.print("UDP Command - speed=");
+            Serial.print(commandDoc.containsKey("speed")
+                             ? (float)commandDoc["speed"]
+                             : 0.0);
+            Serial.print(" rad/s, target_rpm=");
+            Serial.print(target_rpm);
+            Serial.print(", take=");
+            Serial.print(is_take ? "ON" : "OFF");
+            Serial.print(", running=");
+            Serial.print(is_running);
+            Serial.println(is_running ? "ON" : "OFF");
+            lastUdpDebugTime = millis();
+          }
+#endif
+        }
+      } else {
+#ifdef SERIAL_DEBUG_MODE
+        Serial.print("JSON parse error: ");
+        Serial.println(error.c_str());
+#endif
+      }
+    }
+  }
+}
 
 float pid_control(float current_rpm, float target_rpm) {
+  // is_runningがfalseの場合はモーター停止
+  if (!is_running) {
+    return 0.0f;
+  }
+
   unsigned long current_time = millis();
   float dt = (current_time - last_pid_time) / 1000.0f;
 
@@ -79,8 +158,13 @@ float pid_control(float current_rpm, float target_rpm) {
   output += feedforward;
 
   // --- 最小出力しきい値（摩擦を超える） ---
-  if (output > 0.0f && output < 0.5f) output = 0.5f;
-  if (output < 0.0f && output > -0.5f) output = -0.5f;
+  // 0.1以下は0として扱い停止
+  if (output > -zero_threshold && output < zero_threshold)
+    output = 0.0f;
+  else if (output > 0.0f && output < min_current)
+    output = min_current;
+  else if (output < 0.0f && output > -min_current)
+    output = -min_current;
 
   // 出力制限（±3.0A以内）
   if (output > 3.0f) output = 3.0f;
@@ -227,6 +311,13 @@ void setup() {
   Serial.println(WiFi.localIP());
 #endif
 
+  // UDP受信開始
+  commandUdp.begin(RECEIVE_UDP_PORT);
+#ifdef SERIAL_DEBUG_MODE
+  Serial.print("UDP command server started on port ");
+  Serial.println(RECEIVE_UDP_PORT);
+#endif
+
   // Set pins
   ESP32Can.setPins(CAN_TX, CAN_RX);
 
@@ -259,6 +350,9 @@ void loop() {
     // IMUデータを読み取り
     readIMUData();
 
+    // UDP コマンド受信処理
+    processUdpCommand();
+
     // モーター制御 - PID制御で目標RPMに制御
     static unsigned long lastMotorCommand = 0;
     static float current_output = 0.0;
@@ -266,24 +360,26 @@ void loop() {
     static unsigned long target_change_time = 0;
 
     // 5秒ごとに目標RPMを順番に変更（ループ）
-    if (millis() - target_change_time >= 5000) {
-      target_rpm_index =
-          (target_rpm_index + 1) % sequence_length;  // 配列をループ
-      target_rpm = target_rpm_sequence[target_rpm_index];
-      target_change_time = millis();
+    //     if (millis() - target_change_time >= 5000) {
+    //       target_rpm_index =
+    //           (target_rpm_index + 1) % sequence_length;  // 配列をループ
+    //       target_rpm = target_rpm_sequence[target_rpm_index];
+    //       target_change_time = millis();
 
-      Serial.print(">>> Target RPM changed to: ");
-      Serial.print(target_rpm);
-      Serial.print(" (");
-      Serial.print(target_rpm_index + 1);
-      Serial.print("/");
-      Serial.print(sequence_length);
-      Serial.println(")");
+    // #ifdef SERIAL_DEBUG_MODE
+    //       Serial.print(">>> Target RPM changed to: ");
+    //       Serial.print(target_rpm);
+    //       Serial.print(" (");
+    //       Serial.print(target_rpm_index + 1);
+    //       Serial.print("/");
+    //       Serial.print(sequence_length);
+    //       Serial.println(")");
+    // #endif
 
-      // PID状態リセット
-      integral_error = 0.0;
-      previous_error = 0.0;
-    }
+    //       // PID状態リセット
+    //       integral_error = 0.0;
+    //       previous_error = 0.0;
+    //     }
 
     if (millis() - lastMotorCommand >= COMMAND_SEND_INTERVAL) {
       current_output = pid_control(current_rpm, target_rpm);
@@ -367,7 +463,7 @@ void loop() {
           String jsonString;
           serializeJson(doc, jsonString);
 
-          udp.beginPacket(UDP_TARGET_IP, UDP_PORT);
+          udp.beginPacket(UDP_TARGET_IP, POST_UDP_PORT);
           udp.print(jsonString);
           udp.endPacket();
         }

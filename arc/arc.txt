@@ -13,7 +13,7 @@
     const char* SSID = "瞳Phone15";
 const char* PASSWORD = "airiphone";
 const char* UDP_ADDR = "172.20.10.3";  // Unityを実行するPCのIPアドレス
-const uint16_t UDP_PORT = 8887;
+const uint16_t POST_UDP_PORT = 8887;
 
 WiFiUDP udp;
 
@@ -113,7 +113,7 @@ void loop() {
                 "\"YawRot\":0.0}";
 
   // UDPでUnityに送信
-  udp.beginPacket(UDP_ADDR, UDP_PORT);
+  udp.beginPacket(UDP_ADDR, POST_UDP_PORT);
   udp.print(json);
   udp.endPacket();
 
