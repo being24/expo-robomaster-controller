@@ -85,10 +85,10 @@ void processUdpCommand() {
       // JSONをパース
       DeserializationError error = deserializeJson(commandDoc, incomingPacket);
       if (!error) {
-        if (commandDoc.containsKey("speed")) {
-          float speed_rad_s = commandDoc["speed"];
+        if (commandDoc.containsKey("angular_velocity")) {
+          float angular_velocity_rad_s = commandDoc["angular_velocity"];
           // rad/s を RPM に変換 (rad/s * 60 / (2*π) = rad/s * 9.5493)
-          target_rpm = speed_rad_s * 9.5493;
+          target_rpm = angular_velocity_rad_s * 9.5493;
         }
 
         // isTakeフラグの制御
@@ -103,16 +103,15 @@ void processUdpCommand() {
 #ifdef SERIAL_DEBUG_MODE
           static unsigned long lastUdpDebugTime = 0;
           if (millis() - lastUdpDebugTime >= 1000) {  // 1秒間隔で出力制限
-            Serial.print("UDP Command - speed=");
-            Serial.print(commandDoc.containsKey("speed")
-                             ? (float)commandDoc["speed"]
+            Serial.print("UDP Command - angular_velocity=");
+            Serial.print(commandDoc.containsKey("angular_velocity")
+                             ? (float)commandDoc["angular_velocity"]
                              : 0.0);
             Serial.print(" rad/s, target_rpm=");
             Serial.print(target_rpm);
             Serial.print(", take=");
             Serial.print(is_take ? "ON" : "OFF");
             Serial.print(", running=");
-            Serial.print(is_running);
             Serial.println(is_running ? "ON" : "OFF");
             lastUdpDebugTime = millis();
           }
