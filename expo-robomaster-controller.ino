@@ -57,9 +57,9 @@ float min_current = 0.5;  // 最小出力しきい値（摩擦を超えるため
 // 0とみなす
 float zero_threshold = 0.05;
 
-bool is_running = true;    // モーター動作フラグ
+bool is_running = false;    // モーター動作フラグ
 bool is_take = false;      // 取得フラグ
-float target_rpm = 100.0;  // 目標RPM（初期値）
+float target_rpm = 0.0;  // 目標RPM（初期値）
 float integral_error = 0.0;
 float previous_error = 0.0;
 unsigned long last_pid_time = 0;
