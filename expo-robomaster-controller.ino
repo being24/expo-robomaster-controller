@@ -2,6 +2,9 @@
 #include <M5StickCPlus2.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
 // airi
 #define SERIAL_DEBUG_MODE
@@ -78,62 +81,87 @@ unsigned long last_pid_time = 0;
 StaticJsonDocument<300> doc;
 StaticJsonDocument<200> commandDoc;  // コマンド受信用
 
-void processUdpCommand() {
-  int packetSize = commandUdp.parsePacket();
-  if (packetSize) {
-    // airi
-    Serial.println(">>>> UDP Packet Received! <<<<");
+// UDP受信タスク用変数
+SemaphoreHandle_t udpDataMutex;
+bool newUdpDataAvailable = false;
+float latest_angular_velocity = 0.0;
+bool latest_is_running = false;
+bool latest_is_take = false;
 
-    char incomingPacket[256];
-    int len = commandUdp.read(incomingPacket, 255);
-    if (len > 0) {
-      incomingPacket[len] = 0;
-
-      // airi
-      Serial.printf("Received Data: %s\n", incomingPacket);
-
-      // JSONをパース
-      DeserializationError error = deserializeJson(commandDoc, incomingPacket);
-      if (!error) {
-        if (commandDoc.containsKey("angular_velocity")) {
-          float angular_velocity_rad_s = commandDoc["angular_velocity"];
-          // rad/s を RPM に変換 (rad/s * 60 / (2*π) = rad/s * 9.5493)
-          target_rpm = angular_velocity_rad_s * 9.5493;
-        }
-
-        // isTakeフラグの制御
-        if (commandDoc.containsKey("isTake")) {
-          is_take = commandDoc["isTake"];
-        }
-
-        // is_runningフラグの制御（最後に処理）
-        if (commandDoc.containsKey("isRunning")) {
-          is_running = commandDoc["isRunning"];
-
+// UDP受信タスク
+void udpReceiveTask(void* parameter) {
+  while (true) {
+    int packetSize = commandUdp.parsePacket();
+    if (packetSize) {
 #ifdef SERIAL_DEBUG_MODE
-          static unsigned long lastUdpDebugTime = 0;
-          if (millis() - lastUdpDebugTime >= 1000) {  // 1秒間隔で出力制限
-            Serial.print("UDP Command - angular_velocity=");
-            Serial.print(commandDoc.containsKey("angular_velocity")
-                             ? (float)commandDoc["angular_velocity"]
-                             : 0.0);
-            Serial.print(" rad/s, target_rpm=");
-            Serial.print(target_rpm);
-            Serial.print(", take=");
-            Serial.print(is_take ? "ON" : "OFF");
-            Serial.print(", running=");
-            Serial.println(is_running ? "ON" : "OFF");
-            lastUdpDebugTime = millis();
+      Serial.println(">>>> UDP Packet Received! <<<<");
+#endif
+
+      char incomingPacket[256];
+      int len = commandUdp.read(incomingPacket, 255);
+      if (len > 0) {
+        incomingPacket[len] = 0;
+#ifdef SERIAL_DEBUG_MODE
+        Serial.printf("Received Data: %s\n", incomingPacket);
+#endif
+
+        // JSONをパース
+        DeserializationError receive_data =
+            deserializeJson(commandDoc, incomingPacket);
+        if (!receive_data) {
+          // ミューテックスでデータを保護
+          if (xSemaphoreTake(udpDataMutex, portMAX_DELAY)) {
+            if (commandDoc.containsKey("angular_velocity")) {
+              latest_angular_velocity = commandDoc["angular_velocity"];
+            }
+            if (commandDoc.containsKey("isTake")) {
+              latest_is_take = commandDoc["isTake"];
+            }
+            if (commandDoc.containsKey("isRunning")) {
+              latest_is_running = commandDoc["isRunning"];
+            }
+            newUdpDataAvailable = true;
+            xSemaphoreGive(udpDataMutex);
           }
+        } else {
+#ifdef SERIAL_DEBUG_MODE
+          Serial.print("JSON parse receive_data: ");
+          Serial.println(receive_data.c_str());
 #endif
         }
-      } else {
-#ifdef SERIAL_DEBUG_MODE
-        Serial.print("JSON parse error: ");
-        Serial.println(error.c_str());
-#endif
       }
     }
+    vTaskDelay(1);  // 1ms待機
+  }
+}
+
+void processUdpCommand() {
+  // 新しいUDPデータがあるかチェック
+  if (xSemaphoreTake(udpDataMutex, 0) == pdTRUE) {
+    if (newUdpDataAvailable) {
+      // 最新データを適用
+      target_rpm = latest_angular_velocity * 9.5493;  // rad/s を RPM に変換
+      is_take = latest_is_take;
+      is_running = latest_is_running;
+
+      newUdpDataAvailable = false;
+
+#ifdef SERIAL_DEBUG_MODE
+      static unsigned long lastUdpDebugTime = 0;
+      if (millis() - lastUdpDebugTime >= 1000) {  // 1秒間隔で出力制限
+        Serial.print("UDP Command Applied - angular_velocity=");
+        Serial.print(latest_angular_velocity);
+        Serial.print(" rad/s, target_rpm=");
+        Serial.print(target_rpm);
+        Serial.print(", take=");
+        Serial.print(is_take ? "ON" : "OFF");
+        Serial.print(", running=");
+        Serial.println(is_running ? "ON" : "OFF");
+        lastUdpDebugTime = millis();
+      }
+#endif
+    }
+    xSemaphoreGive(udpDataMutex);
   }
 }
 
@@ -326,6 +354,19 @@ void setup() {
   Serial.print("UDP command server started on port ");
   Serial.println(RECEIVE_UDP_PORT);
 #endif
+
+  // ミューテックス作成
+  udpDataMutex = xSemaphoreCreateMutex();
+
+  // UDP受信タスクを作成
+  xTaskCreatePinnedToCore(udpReceiveTask,    // タスク関数
+                          "UDPReceiveTask",  // タスク名
+                          4096,              // スタックサイズ
+                          NULL,              // パラメータ
+                          2,                 // 優先度 (高め)
+                          NULL,              // タスクハンドル
+                          0                  // コア0で実行
+  );
 
   // Set pins
   ESP32Can.setPins(CAN_TX, CAN_RX);
