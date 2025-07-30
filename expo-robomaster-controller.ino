@@ -366,8 +366,9 @@ void loop() {
 #ifdef ENABLE_DISPLAY
     M5.Display.fillScreen(BLACK);
     M5.Display.setCursor(0, 0);
-    M5.Display.printf("UDP Command:\n\n");
-    M5.Display.printf("Target RPM:\n %.2f\n\n", target_rpm);
+    M5.Display.printf("IP: %s\n\n", WiFi.localIP().toString().c_str());
+    M5.Display.printf("UDP Command:\n");
+    M5.Display.printf("Target RPM:\n %.2f\n", target_rpm);
     M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
     M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
 #endif
