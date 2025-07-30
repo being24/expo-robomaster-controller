@@ -3,6 +3,10 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
 
+//airi
+#define SERIAL_DEBUG_MODE
+#define ENABLE_DISPLAY
+
 #include <ESP32-TWAI-CAN.hpp>
 
 #include "wifi_config.h"  // WiFi設定を別ファイルから読み込み
@@ -28,7 +32,7 @@ WiFiUDP udp;
 WiFiUDP commandUdp;  // コマンド受信用
 bool wifiConnected = false;
 
-const int RECEIVE_UDP_PORT = 8887;  // コマンド受信ポート
+//const int RECEIVE_UDP_PORT = 8887;  // コマンド受信ポート
 
 int counter = 0;
 bool data_size_error_flag_ = false;
@@ -77,10 +81,17 @@ StaticJsonDocument<200> commandDoc;  // コマンド受信用
 void processUdpCommand() {
   int packetSize = commandUdp.parsePacket();
   if (packetSize) {
+
+    //airi
+    Serial.println(">>>> UDP Packet Received! <<<<"); 
+
     char incomingPacket[256];
     int len = commandUdp.read(incomingPacket, 255);
     if (len > 0) {
       incomingPacket[len] = 0;
+
+      //airi
+      Serial.printf("Received Data: %s\n", incomingPacket); 
 
       // JSONをパース
       DeserializationError error = deserializeJson(commandDoc, incomingPacket);
@@ -351,6 +362,16 @@ void loop() {
 
     // UDP コマンド受信処理
     processUdpCommand();
+
+    //airi
+    #ifdef ENABLE_DISPLAY
+    M5.Display.fillScreen(BLACK);
+    M5.Display.setCursor(0, 0);
+    M5.Display.printf("UDP Command:\n\n");
+    M5.Display.printf("Target RPM:\n %.2f\n\n", target_rpm);
+    M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
+    M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
+    #endif
 
     // モーター制御 - PID制御で目標RPMに制御
     static unsigned long lastMotorCommand = 0;
