@@ -9,6 +9,7 @@
 // airi
 #define SERIAL_DEBUG_MODE
 #define ENABLE_DISPLAY
+// #define UDP_LOG_MODE
 
 #include <ESP32-TWAI-CAN.hpp>
 
@@ -17,7 +18,7 @@
 #define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力
 // #define DEV_DEBUG_MODE     // 開発用デバッグ出力（受信IDなど）
 #define WIFI_DEBUG_MODE     // WiFiスキャンとネットワーク情報の表示
-#define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
+//#define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
 
 // Default for M5StickC PLUS2
 #define CAN_TX 32
@@ -54,7 +55,9 @@ float ki = 0.1;    // 積分ゲイン（無効化）
 float kd = 0.0;    // 微分ゲイン（無効化）
 #else
 float kp = 0.01;  // 比例ゲイン
+// float kp = 0.005;  // 比例ゲイン
 float ki = 0.1;   // 積分ゲイン
+// float ki = 0.0;   // 積分ゲイン
 float kd = 0.0;   // 微分ゲイン
 #endif
 
@@ -93,7 +96,7 @@ void udpReceiveTask(void* parameter) {
   while (true) {
     int packetSize = commandUdp.parsePacket();
     if (packetSize) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef UDP_LOG_MODE
       Serial.println(">>>> UDP Packet Received! <<<<");
 #endif
 
@@ -101,11 +104,11 @@ void udpReceiveTask(void* parameter) {
       int len = commandUdp.read(incomingPacket, 255);
       if (len > 0) {
         incomingPacket[len] = 0;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef UDP_LOG_MODE
         Serial.printf("Received Data: %s\n", incomingPacket);
 #endif
 
-        // JSONをパース
+        // JSONをパースJ
         DeserializationError receive_data =
             deserializeJson(commandDoc, incomingPacket);
         if (!receive_data) {
@@ -413,6 +416,13 @@ void loop() {
     M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
     M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
 #endif
+ if(target_rpm < current_rpm){
+  ki = 0.0;
+ }else{
+  ki = 0.1;
+ }
+
+
 
     // モーター制御 - PID制御で目標RPMに制御
     static unsigned long lastMotorCommand = 0;
