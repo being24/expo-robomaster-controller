@@ -185,7 +185,7 @@ float pid_control(float current_rpm, float target_rpm) {
 
   // 【対策1】目標値変更時の積分項リセット
   static float previous_target_rpm = target_rpm;
-  if (abs(target_rpm - previous_target_rpm) > 1.0f) {  // 低速用に1.0RPMに変更
+  if (abs(target_rpm - previous_target_rpm) > 0.5f) {  // 低速用に0.5RPMに変更
     integral_error = 0.0;
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("Target changed - Integral reset");
@@ -193,23 +193,30 @@ float pid_control(float current_rpm, float target_rpm) {
   }
   previous_target_rpm = target_rpm;
 
-  // 【対策2】符号変化時の積分項リセット（速度分岐は削除）
+  // 【対策2】符号変化時の積分項リセット（ブレーキ判定）
   static float previous_error_sign = 0.0;
   float current_error_sign = (error > 0) ? 1.0 : (error < 0) ? -1.0 : 0.0;
-  if (previous_error_sign != 0 && current_error_sign != 0 &&
-      previous_error_sign != current_error_sign) {
-    integral_error = 0.0;  // 符号変化時はリセット
+  bool is_braking = (previous_error_sign != 0 && current_error_sign != 0 &&
+                     previous_error_sign != current_error_sign);
+
+  if (is_braking) {
+    integral_error = 0.0;  // ブレーキ時は積分項をリセット
 #ifdef SERIAL_DEBUG_MODE
-    Serial.println("Error sign changed - Integral reset");
+    Serial.println("Braking detected - Integral reset");
 #endif
   }
   previous_error_sign = current_error_sign;
 
-  // 積分項更新（通常通り）
-  integral_error += error * dt;
+  // 【対策3】ブレーキ時は積分更新を無効化、通常時は積分更新
+  if (is_braking) {
+    // ブレーキ時は積分更新しない
+    // integral_error += 0;  // 明示的に無効化
+  } else {
+    // 通常時は積分更新
+    integral_error += error * dt;
+  }
 
-  // 【対策3】積分制限値を元に戻す（重いものを低速で回すため）
-  float max_integral = 100.0f;  // 30.0fから100.0fに戻す
+  float max_integral = 100.0f;
   if (integral_error > max_integral) integral_error = max_integral;
   if (integral_error < -max_integral) integral_error = -max_integral;
 
@@ -438,11 +445,6 @@ void loop() {
     M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
     M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
 #endif
-    if (target_rpm < current_rpm) {
-      ki = 0.0;
-    } else {
-      ki = 0.1;
-    }
 
     // モーター制御 - PID制御で目標RPMに制御
     static unsigned long lastMotorCommand = 0;
