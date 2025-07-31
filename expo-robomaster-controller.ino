@@ -17,8 +17,8 @@
 
 #define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力
 // #define DEV_DEBUG_MOE     // 開発用デバッグ出力（受信IDなど）
-#define WIFI_DEBUG_MODE     // WiFiスキャンとネットワーク情報の表示
-//#define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
+#define WIFI_DEBUG_MODE  // WiFiスキャンとネットワーク情報の表示
+// #define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
 
 // Default for M5StickC PLUS2
 #define CAN_TX 32
@@ -56,9 +56,9 @@ float kd = 0.0;    // 微分ゲイン（無効化）
 #else
 float kp = 0.01;  // 比例ゲイン
 // float kp = 0.005;  // 比例ゲイン
-float ki = 0.1;   // 積分ゲイン
+float ki = 0.1;  // 積分ゲイン
 // float ki = 0.0;   // 積分ゲイン
-float kd = 0.0;   // 微分ゲイン
+float kd = 0.0;  // 微分ゲイン
 #endif
 
 // minimum current
@@ -171,6 +171,7 @@ void processUdpCommand() {
 float pid_control(float current_rpm, float target_rpm) {
   // is_runningがfalseの場合はモーター停止
   if (!is_running) {
+    integral_error = 0.0;  // 停止時は積分項をリセット
     return 0.0f;
   }
 
@@ -182,10 +183,35 @@ float pid_control(float current_rpm, float target_rpm) {
   // 誤差計算
   float error = target_rpm - current_rpm;
 
-  // 積分項（ワインドアップ抑制付き）
+  // 【対策1】目標値変更時の積分項リセット
+  static float previous_target_rpm = target_rpm;
+  if (abs(target_rpm - previous_target_rpm) > 1.0f) {  // 低速用に1.0RPMに変更
+    integral_error = 0.0;
+#ifdef SERIAL_DEBUG_MODE
+    Serial.println("Target changed - Integral reset");
+#endif
+  }
+  previous_target_rpm = target_rpm;
+
+  // 【対策2】符号変化時の積分項リセット（速度分岐は削除）
+  static float previous_error_sign = 0.0;
+  float current_error_sign = (error > 0) ? 1.0 : (error < 0) ? -1.0 : 0.0;
+  if (previous_error_sign != 0 && current_error_sign != 0 &&
+      previous_error_sign != current_error_sign) {
+    integral_error = 0.0;  // 符号変化時はリセット
+#ifdef SERIAL_DEBUG_MODE
+    Serial.println("Error sign changed - Integral reset");
+#endif
+  }
+  previous_error_sign = current_error_sign;
+
+  // 積分項更新（通常通り）
   integral_error += error * dt;
-  if (integral_error > 100.0f) integral_error = 100.0f;
-  if (integral_error < -100.0f) integral_error = -100.0f;
+
+  // 【対策3】積分制限値を元に戻す（重いものを低速で回すため）
+  float max_integral = 100.0f;  // 30.0fから100.0fに戻す
+  if (integral_error > max_integral) integral_error = max_integral;
+  if (integral_error < -max_integral) integral_error = -max_integral;
 
   // 微分項
   float derivative_error = (error - previous_error) / dt;
@@ -193,12 +219,11 @@ float pid_control(float current_rpm, float target_rpm) {
   // PID出力計算
   float output = kp * error + ki * integral_error + kd * derivative_error;
 
-  // --- フィードフォワード項（速度比例） ---
-  float feedforward = target_rpm * 0.005f;  // 要調整（目安）
+  // フィードフォワード項（速度比例）
+  float feedforward = target_rpm * 0.005f;
   output += feedforward;
 
-  // --- 最小出力しきい値（摩擦を超える） ---
-  // 0.1以下は0として扱い停止
+  // 最小出力しきい値（摩擦を超える）
   if (output > -zero_threshold && output < zero_threshold)
     output = 0.0f;
   else if (output > 0.0f && output < min_current)
@@ -209,9 +234,6 @@ float pid_control(float current_rpm, float target_rpm) {
   // 出力制限（±3.0A以内）
   if (output > 3.0f) output = 3.0f;
   if (output < -3.0f) output = -3.0f;
-
-  // デッドバンドは無効化して様子を見る
-  // if (abs(error) < 5.0f) output = 0.0f;
 
   previous_error = error;
   last_pid_time = current_time;
@@ -416,13 +438,11 @@ void loop() {
     M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
     M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
 #endif
- if(target_rpm < current_rpm){
-  ki = 0.0;
- }else{
-  ki = 0.1;
- }
-
-
+    if (target_rpm < current_rpm) {
+      ki = 0.0;
+    } else {
+      ki = 0.1;
+    }
 
     // モーター制御 - PID制御で目標RPMに制御
     static unsigned long lastMotorCommand = 0;
