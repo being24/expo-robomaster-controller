@@ -16,7 +16,7 @@
 #include "wifi_config.h"  // WiFi設定を別ファイルから読み込み
 
 #define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力
-// #define DEV_DEBUG_MODE     // 開発用デバッグ出力（受信IDなど）
+// #define DEV_DEBUG_MOE     // 開発用デバッグ出力（受信IDなど）
 #define WIFI_DEBUG_MODE     // WiFiスキャンとネットワーク情報の表示
 //#define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
 
