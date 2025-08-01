@@ -54,18 +54,18 @@ float kp = 0.005;  // 比例ゲイン（無効化）
 float ki = 0.1;    // 積分ゲイン（無効化）
 float kd = 0.0;    // 微分ゲイン（無効化）
 #else
-float kp = 0.01;  // 比例ゲイン
-// float kp = 0.005;  // 比例ゲイン
-float ki = 0.1;  // 積分ゲイン
-// float ki = 0.0;   // 積分ゲイン
-float kd = 0.0;  // 微分ゲイン
+// float kp = 0.01;  // 比例ゲイン
+float kp = 0.15;  // 比例ゲイン
+// float ki = 0.1;  // 積分ゲイン
+float ki = 1.5;   // 積分ゲイン
+float kd = 0.002;  // 微分ゲイン
 #endif
 
 // minimum current
-float min_current = 0.5;  // 最小出力しきい値（摩擦を超えるための値）
+float min_current = 0.3;  // 最小出力しきい値（摩擦を超えるための値）
 
 // 0とみなす
-float zero_threshold = 0.05;
+float zero_threshold = 0.01;
 
 bool is_running = false;  // モーター動作フラグ
 bool is_take = false;     // 取得フラグ
@@ -227,7 +227,7 @@ float pid_control(float current_rpm, float target_rpm) {
   float output = kp * error + ki * integral_error + kd * derivative_error;
 
   // フィードフォワード項（速度比例）
-  float feedforward = target_rpm * 0.005f;
+  float feedforward = target_rpm * 0.01f;
   output += feedforward;
 
   // 最小出力しきい値（摩擦を超える）
@@ -563,7 +563,7 @@ void loop() {
 
 #ifdef SERIAL_DEBUG_MODE
         // JSON形式での出力
-        if (!(i % 100)) {  // 出力頻度制限
+        if (!(i % 10)) {  // 出力頻度制限
           // JSONドキュメントを作成
 
           // JSONを出力
