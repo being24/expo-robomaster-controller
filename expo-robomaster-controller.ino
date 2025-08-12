@@ -13,11 +13,11 @@
 
 #include <ESP32-TWAI-CAN.hpp>
 
-#include "wifi_config.h" // WiFi設定を別ファイルから読み込み
+#include "wifi_config.h"  // WiFi設定を別ファイルから読み込み
 
-#define SERIAL_DEBUG_MODE // CSV出力やシリアルプロッタ用の出力
+#define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力
 // #define DEV_DEBUG_MOE     // 開発用デバッグ出力（受信IDなど）
-#define WIFI_DEBUG_MODE // WiFiスキャンとネットワーク情報の表示
+#define WIFI_DEBUG_MODE  // WiFiスキャンとネットワーク情報の表示
 // #define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
 
 // Default for M5StickC PLUS2
@@ -27,13 +27,13 @@
 #define BASE_ID 0x204
 
 // コマンドの送信感覚
-#define COMMAND_SEND_INTERVAL 20 // ms
+#define COMMAND_SEND_INTERVAL 20  // ms
 #define LOOP_INTERVAL 10
 
 CanFrame rxFrame;
 
 WiFiUDP udp;
-WiFiUDP commandUdp; // コマンド受信用
+WiFiUDP commandUdp;  // コマンド受信用
 bool wifiConnected = false;
 
 // const int RECEIVE_UDP_PORT = 8887;  // コマンド受信ポート
@@ -50,26 +50,26 @@ constexpr int motor_id = 1;
 // PID制御パラメータ（振動を抑えるために調整）
 #ifdef NO_LOAD_DEBUG_MODE
 // 負荷なしデバッグモードではPID制御を無効化
-float kp = 0.005; // 比例ゲイン（無効化）
-float ki = 0.1;   // 積分ゲイン（無効化）
-float kd = 0.0;   // 微分ゲイン（無効化）
+float kp = 0.005;  // 比例ゲイン（無効化）
+float ki = 0.1;    // 積分ゲイン（無効化）
+float kd = 0.0;    // 微分ゲイン（無効化）
 #else
-float kp = 0.01; // 比例ゲイン
+float kp = 0.01;  // 比例ゲイン
 // float kp = 0.005;  // 比例ゲイン
-float ki = 0.1; // 積分ゲイン
+float ki = 0.1;  // 積分ゲイン
 // float ki = 0.0;   // 積分ゲイン
-float kd = 0.0; // 微分ゲイン
+float kd = 0.0;  // 微分ゲイン
 #endif
 
 // minimum current
-float min_current = 0.5; // 最小出力しきい値（摩擦を超えるための値）
+float min_current = 0.5;  // 最小出力しきい値（摩擦を超えるための値）
 
 // 0とみなす
 float zero_threshold = 0.05;
 
-bool is_running = false; // モーター動作フラグ
-bool is_take = false;    // 取得フラグ
-float target_rpm = 0.0;  // 目標RPM（初期値）
+bool is_running = false;  // モーター動作フラグ
+bool is_take = false;     // 取得フラグ
+float target_rpm = 0.0;   // 目標RPM（初期値）
 float integral_error = 0.0;
 float previous_error = 0.0;
 unsigned long last_pid_time = 0;
@@ -82,7 +82,7 @@ unsigned long last_pid_time = 0;
 
 // json
 StaticJsonDocument<300> doc;
-StaticJsonDocument<200> commandDoc; // コマンド受信用
+StaticJsonDocument<200> commandDoc;  // コマンド受信用
 
 // UDP受信タスク用変数
 SemaphoreHandle_t udpDataMutex;
@@ -103,21 +103,17 @@ static int rpm_buffer_idx = 0;
 static bool rpm_buffer_full = false;
 
 // UDP受信タスク
-void udpReceiveTask(void *parameter)
-{
-  while (true)
-  {
+void udpReceiveTask(void *parameter) {
+  while (true) {
     int packetSize = commandUdp.parsePacket();
-    if (packetSize)
-    {
+    if (packetSize) {
 #ifdef UDP_LOG_MODE
       Serial.println(">>>> UDP Packet Received! <<<<");
 #endif
 
       char incomingPacket[256];
       int len = commandUdp.read(incomingPacket, 255);
-      if (len > 0)
-      {
+      if (len > 0) {
         incomingPacket[len] = 0;
 #ifdef UDP_LOG_MODE
         Serial.printf("Received Data: %s\n", incomingPacket);
@@ -126,29 +122,22 @@ void udpReceiveTask(void *parameter)
         // JSONをパースJ
         DeserializationError receive_data =
             deserializeJson(commandDoc, incomingPacket);
-        if (!receive_data)
-        {
+        if (!receive_data) {
           // ミューテックスでデータを保護
-          if (xSemaphoreTake(udpDataMutex, portMAX_DELAY))
-          {
-            if (commandDoc.containsKey("angular_velocity"))
-            {
+          if (xSemaphoreTake(udpDataMutex, portMAX_DELAY)) {
+            if (commandDoc.containsKey("angular_velocity")) {
               latest_angular_velocity = commandDoc["angular_velocity"];
             }
-            if (commandDoc.containsKey("isTake"))
-            {
+            if (commandDoc.containsKey("isTake")) {
               latest_is_take = commandDoc["isTake"];
             }
-            if (commandDoc.containsKey("isRunning"))
-            {
+            if (commandDoc.containsKey("isRunning")) {
               latest_is_running = commandDoc["isRunning"];
             }
             newUdpDataAvailable = true;
             xSemaphoreGive(udpDataMutex);
           }
-        }
-        else
-        {
+        } else {
 #ifdef SERIAL_DEBUG_MODE
           Serial.print("JSON parse receive_data: ");
           Serial.println(receive_data.c_str());
@@ -156,19 +145,16 @@ void udpReceiveTask(void *parameter)
         }
       }
     }
-    vTaskDelay(1); // 1ms待機
+    vTaskDelay(1);  // 1ms待機
   }
 }
 
-void processUdpCommand()
-{
+void processUdpCommand() {
   // 新しいUDPデータがあるかチェック
-  if (xSemaphoreTake(udpDataMutex, 0) == pdTRUE)
-  {
-    if (newUdpDataAvailable)
-    {
+  if (xSemaphoreTake(udpDataMutex, 0) == pdTRUE) {
+    if (newUdpDataAvailable) {
       // 最新データを適用
-      target_rpm = latest_angular_velocity * 9.5493; // rad/s を RPM に変換
+      target_rpm = latest_angular_velocity * 9.5493;  // rad/s を RPM に変換
       is_take = latest_is_take;
       is_running = latest_is_running;
 
@@ -176,8 +162,7 @@ void processUdpCommand()
 
 #ifdef SERIAL_DEBUG_MODE
       static unsigned long lastUdpDebugTime = 0;
-      if (millis() - lastUdpDebugTime >= 1000)
-      { // 1秒間隔で出力制限
+      if (millis() - lastUdpDebugTime >= 1000) {  // 1秒間隔で出力制限
         Serial.print("UDP Command Applied - angular_velocity=");
         Serial.print(latest_angular_velocity);
         Serial.print(" rad/s, target_rpm=");
@@ -195,10 +180,8 @@ void processUdpCommand()
 }
 
 // 角度から瞬間RPMを計算（メモリ節約型）
-float calculateInstantRpm(float current_angle, unsigned long current_time)
-{
-  if (!angle_calc_initialized)
-  {
+float calculateInstantRpm(float current_angle, unsigned long current_time) {
+  if (!angle_calc_initialized) {
     prev_angle = current_angle;
     prev_time = current_time;
     angle_calc_initialized = true;
@@ -206,15 +189,14 @@ float calculateInstantRpm(float current_angle, unsigned long current_time)
   }
 
   unsigned long time_diff = current_time - prev_time;
-  if (time_diff == 0)
-    return 0.0;
+  if (time_diff == 0) return 0.0;
 
   // 角度差計算（360度リセット対策）
   float angle_diff = current_angle - prev_angle;
   if (angle_diff > 180.0)
-    angle_diff -= 360.0; // 1°→359° の場合
+    angle_diff -= 360.0;  // 1°→359° の場合
   else if (angle_diff < -180.0)
-    angle_diff += 360.0; // 359°→1° の場合
+    angle_diff += 360.0;  // 359°→1° の場合
 
   // 瞬間RPM計算: deg/ms * 1000ms/s * 60s/min / 360deg/rev
   float instant_rpm = (angle_diff / (float)time_diff) * 1000.0 * 60.0 / 360.0;
@@ -227,48 +209,41 @@ float calculateInstantRpm(float current_angle, unsigned long current_time)
 }
 
 // RPM移動平均フィルター
-float applyRpmFilter(float new_rpm)
-{
+float applyRpmFilter(float new_rpm) {
   rpm_buffer[rpm_buffer_idx] = new_rpm;
   rpm_buffer_idx = (rpm_buffer_idx + 1) % RPM_FILTER_SIZE;
 
-  if (!rpm_buffer_full && rpm_buffer_idx == 0)
-  {
+  if (!rpm_buffer_full && rpm_buffer_idx == 0) {
     rpm_buffer_full = true;
   }
 
   float sum = 0.0;
   int count = rpm_buffer_full ? RPM_FILTER_SIZE : rpm_buffer_idx;
-  for (int i = 0; i < count; i++)
-  {
+  for (int i = 0; i < count; i++) {
     sum += rpm_buffer[i];
   }
 
   return sum / count;
 }
 
-float pid_control(float current_rpm, float target_rpm)
-{
+float pid_control(float current_rpm, float target_rpm) {
   // is_runningがfalseの場合はモーター停止
-  if (!is_running)
-  {
-    integral_error = 0.0; // 停止時は積分項をリセット
+  if (!is_running) {
+    integral_error = 0.0;  // 停止時は積分項をリセット
     return 0.0f;
   }
 
   unsigned long current_time = millis();
   float dt = (current_time - last_pid_time) / 1000.0f;
 
-  if (dt <= 0.0f)
-    dt = 0.001f;
+  if (dt <= 0.0f) dt = 0.001f;
 
   // 誤差計算
   float error = target_rpm - current_rpm;
 
   // 【対策1】目標値変更時の積分項リセット
   static float previous_target_rpm = target_rpm;
-  if (abs(target_rpm - previous_target_rpm) > 0.5f)
-  { // 低速用に0.5RPMに変更
+  if (abs(target_rpm - previous_target_rpm) > 0.5f) {  // 低速用に0.5RPMに変更
     integral_error = 0.0;
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("Target changed - Integral reset");
@@ -278,14 +253,12 @@ float pid_control(float current_rpm, float target_rpm)
 
   // 【対策2】符号変化時の積分項リセット（ブレーキ判定）
   static float previous_error_sign = 0.0;
-  float current_error_sign = (error > 0) ? 1.0 : (error < 0) ? -1.0
-                                                             : 0.0;
+  float current_error_sign = (error > 0) ? 1.0 : (error < 0) ? -1.0 : 0.0;
   bool is_braking = (previous_error_sign != 0 && current_error_sign != 0 &&
                      previous_error_sign != current_error_sign);
 
-  if (is_braking)
-  {
-    integral_error = 0.0; // ブレーキ時は積分項をリセット
+  if (is_braking) {
+    integral_error = 0.0;  // ブレーキ時は積分項をリセット
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("Braking detected - Integral reset");
 #endif
@@ -293,22 +266,17 @@ float pid_control(float current_rpm, float target_rpm)
   previous_error_sign = current_error_sign;
 
   // 【対策3】ブレーキ時は積分更新を無効化、通常時は積分更新
-  if (is_braking)
-  {
+  if (is_braking) {
     // ブレーキ時は積分更新しない
     // integral_error += 0;  // 明示的に無効化
-  }
-  else
-  {
+  } else {
     // 通常時は積分更新
     integral_error += error * dt;
   }
 
   float max_integral = 100.0f;
-  if (integral_error > max_integral)
-    integral_error = max_integral;
-  if (integral_error < -max_integral)
-    integral_error = -max_integral;
+  if (integral_error > max_integral) integral_error = max_integral;
+  if (integral_error < -max_integral) integral_error = -max_integral;
 
   // 微分項
   float derivative_error = (error - previous_error) / dt;
@@ -329,10 +297,8 @@ float pid_control(float current_rpm, float target_rpm)
     output = -min_current;
 
   // 出力制限（±3.0A以内）
-  if (output > 3.0f)
-    output = 3.0f;
-  if (output < -3.0f)
-    output = -3.0f;
+  if (output > 3.0f) output = 3.0f;
+  if (output < -3.0f) output = -3.0f;
 
   previous_error = error;
   last_pid_time = current_time;
@@ -340,18 +306,15 @@ float pid_control(float current_rpm, float target_rpm)
   return output;
 }
 
-void send_cur(float cur)
-{
-  constexpr float MAX_CUR_A = 3.0f;      // 最大±3A
-  constexpr int16_t MAX_CUR_VAL = 16384; // ±16384 = 3A
-  constexpr uint32_t CAN_ID = 0x1FF;     // モーターID 1～4 に対応
+void send_cur(float cur) {
+  constexpr float MAX_CUR_A = 3.0f;       // 最大±3A
+  constexpr int16_t MAX_CUR_VAL = 16384;  // ±16384 = 3A
+  constexpr uint32_t CAN_ID = 0x1FF;      // モーターID 1～4 に対応
 
   // 電流[A] → 指令値 [-16384, +16384] に変換
   float scaled = cur * (MAX_CUR_VAL / MAX_CUR_A);
-  if (scaled > MAX_CUR_VAL)
-    scaled = MAX_CUR_VAL;
-  if (scaled < -MAX_CUR_VAL)
-    scaled = -MAX_CUR_VAL;
+  if (scaled > MAX_CUR_VAL) scaled = MAX_CUR_VAL;
+  if (scaled < -MAX_CUR_VAL) scaled = -MAX_CUR_VAL;
   int16_t command = static_cast<int16_t>(scaled);
 
   // CANフレーム作成
@@ -361,13 +324,12 @@ void send_cur(float cur)
   frame.data_length_code = 8;
 
   // 8バイト初期化（冗長だが明示的に）
-  for (int i = 0; i < 8; i++)
-    frame.data[i] = 0;
+  for (int i = 0; i < 8; i++) frame.data[i] = 0;
 
   // モーターIDに応じた位置に電流コマンドを格納
   int byteIndex = (motor_id - 1) * 2;
-  frame.data[byteIndex] = (command >> 8) & 0xFF; // 上位バイト
-  frame.data[byteIndex + 1] = command & 0xFF;    // 下位バイト
+  frame.data[byteIndex] = (command >> 8) & 0xFF;  // 上位バイト
+  frame.data[byteIndex + 1] = command & 0xFF;     // 下位バイト
 
   // フレーム送信
   ESP32Can.writeFrame(frame);
@@ -381,25 +343,20 @@ void send_cur(float cur)
   Serial.print("A Command: ");
   Serial.print(command);
   Serial.print(" Data: ");
-  for (int i = 0; i < frame.data_length_code; i++)
-  {
+  for (int i = 0; i < frame.data_length_code; i++) {
     Serial.print("0x");
-    if (frame.data[i] < 16)
-      Serial.print("0");
+    if (frame.data[i] < 16) Serial.print("0");
     Serial.print(frame.data[i], HEX);
-    if (i < frame.data_length_code - 1)
-      Serial.print(", ");
+    if (i < frame.data_length_code - 1) Serial.print(", ");
   }
   Serial.println();
 #endif
 }
 
-void readIMUData()
-{
+void readIMUData() {
   M5.update();
   auto imu_update = M5.Imu.update();
-  if (imu_update)
-  {
+  if (imu_update) {
     auto data = M5.Imu.getImuData();
 
     // Get acceleration data (m/s^2)
@@ -414,8 +371,7 @@ void readIMUData()
   }
 }
 
-void setup()
-{
+void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
   M5.Display.setRotation(3);
@@ -428,8 +384,7 @@ void setup()
 #ifdef SERIAL_DEBUG_MODE
   // Setup serial for debugging.
   Serial.begin(115200);
-  while (!Serial)
-    ;
+  while (!Serial);
 #endif
 
   // WiFiスキャンを実行
@@ -438,17 +393,13 @@ void setup()
 
   int numNetworks = WiFi.scanNetworks();
 
-  if (numNetworks == 0)
-  {
+  if (numNetworks == 0) {
     Serial.println("No networks found");
-  }
-  else
-  {
+  } else {
     Serial.print(numNetworks);
     Serial.println(" networks found:");
 
-    for (int i = 0; i < numNetworks; i++)
-    {
+    for (int i = 0; i < numNetworks; i++) {
       Serial.print(i + 1);
       Serial.print(": ");
       Serial.print(WiFi.SSID(i));
@@ -472,8 +423,7 @@ void setup()
   Serial.println(WIFI_PASSWORD);
 #endif
 
-  while (WiFi.status() != WL_CONNECTED)
-  {
+  while (WiFi.status() != WL_CONNECTED) {
     delay(500);
 #ifdef SERIAL_DEBUG_MODE
     Serial.print(".");
@@ -486,6 +436,8 @@ void setup()
   Serial.println("WiFi connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+  Serial.print("UDP target IP: ");
+  Serial.println(UDP_TARGET_IP);
 #endif
 
   // UDP受信開始
@@ -499,13 +451,13 @@ void setup()
   udpDataMutex = xSemaphoreCreateMutex();
 
   // UDP受信タスクを作成
-  xTaskCreatePinnedToCore(udpReceiveTask,   // タスク関数
-                          "UDPReceiveTask", // タスク名
-                          4096,             // スタックサイズ
-                          NULL,             // パラメータ
-                          2,                // 優先度 (高め)
-                          NULL,             // タスクハンドル
-                          0                 // コア0で実行
+  xTaskCreatePinnedToCore(udpReceiveTask,    // タスク関数
+                          "UDPReceiveTask",  // タスク名
+                          4096,              // スタックサイズ
+                          NULL,              // パラメータ
+                          2,                 // 優先度 (高め)
+                          NULL,              // タスクハンドル
+                          0                  // コア0で実行
   );
 
   // Set pins
@@ -520,29 +472,23 @@ void setup()
   ESP32Can.setSpeed(ESP32Can.convertSpeed(1000));
 
   // Initialize CAN bus
-  if (ESP32Can.begin())
-  {
+  if (ESP32Can.begin()) {
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("CAN bus started!");
-    Serial.println("JSON data output started"); // JSON format notice
+    Serial.println("JSON data output started");  // JSON format notice
 #endif
-  }
-  else
-  {
+  } else {
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("CAN bus failed!");
 #endif
-    while (1)
-      ;
+    while (1);
   }
 }
 
-void loop()
-{
+void loop() {
   int i = 0;
 
-  while (true)
-  {
+  while (true) {
     // IMUデータを読み取り
     readIMUData();
 
@@ -588,16 +534,14 @@ void loop()
     //       previous_error = 0.0;
     //     }
 
-    if (millis() - lastMotorCommand >= COMMAND_SEND_INTERVAL)
-    {
+    if (millis() - lastMotorCommand >= COMMAND_SEND_INTERVAL) {
       current_output = pid_control(current_rpm, target_rpm);
       send_cur(current_output);
       lastMotorCommand = millis();
     }
 
     // CAN受信処理（sample.txtの効率的な方式を採用）
-    if (ESP32Can.readFrame(rxFrame, 1))
-    {
+    if (ESP32Can.readFrame(rxFrame, 1)) {
 #ifdef DEV_DEBUG_MODE
       // 開発用デバッグ：受信したすべてのフレームIDを表示
       Serial.print("Received ID: 0x");
@@ -607,20 +551,16 @@ void loop()
 
       // 受信データも表示
       Serial.print(" RawData: ");
-      for (int j = 0; j < rxFrame.data_length_code; j++)
-      {
+      for (int j = 0; j < rxFrame.data_length_code; j++) {
         Serial.print("0x");
-        if (rxFrame.data[j] < 16)
-          Serial.print("0");
+        if (rxFrame.data[j] < 16) Serial.print("0");
         Serial.print(rxFrame.data[j], HEX);
-        if (j < rxFrame.data_length_code - 1)
-          Serial.print(" ");
+        if (j < rxFrame.data_length_code - 1) Serial.print(" ");
       }
       Serial.println();
 #endif
 
-      if (rxFrame.identifier == BASE_ID + motor_id)
-      { // motor_id=1なので0x205
+      if (rxFrame.identifier == BASE_ID + motor_id) {  // motor_id=1なので0x205
         counter++;
         data_size_error_flag_ = (rxFrame.data_length_code != 8);
 
@@ -632,7 +572,7 @@ void loop()
 
         // --- 正規化 ---
         float angle_deg = mech_angle * 360.0f / 8192.0f;
-        float speed_rpm_raw = speed; // モーターから直接取得したRPM
+        float speed_rpm_raw = speed;  // モーターから直接取得したRPM
 
         // 角度から瞬間RPMを計算
         float instant_rpm = calculateInstantRpm(angle_deg, millis());
@@ -640,9 +580,8 @@ void loop()
         // 移動平均フィルターを適用
         float speed_rpm = applyRpmFilter(instant_rpm);
 
-        float speed_deg =
-            -speed_rpm *
-            6.0f; // 角度計算RPM -> deg/s変換 (RPM * 360deg/60s = RPM * 6) 軸反転
+        float speed_deg = -speed_rpm * 6.0f;  // 角度計算RPM -> deg/s変換 (RPM *
+                                              // 360deg/60s = RPM * 6) 軸反転
         float current_A = torque / 2048.0f;
 
         // PID制御のために角度計算RPMを使用
@@ -651,9 +590,10 @@ void loop()
         // モーターデータを追加
         doc["motor"]["current"] = current_A;
         doc["motor"]["angle"] = angle_deg;
-        doc["motor"]["speed"] = speed_rpm;           // 角度計算RPM（移動平均後）
-        doc["motor"]["speed_raw"] = speed_rpm_raw;   // モーター直接取得RPM
-        doc["motor"]["speed_instant"] = instant_rpm; // 瞬間角度計算RPM（フィルター前）
+        doc["motor"]["speed"] = speed_rpm;          // 角度計算RPM（移動平均後）
+        doc["motor"]["speed_raw"] = speed_rpm_raw;  // モーター直接取得RPM
+        doc["motor"]["speed_instant"] =
+            instant_rpm;  // 瞬間角度計算RPM（フィルター前）
         doc["motor"]["torque"] = torque;
         doc["motor"]["temp"] = temp;
 
@@ -664,7 +604,7 @@ void loop()
         doc["control"]["error"] = target_rpm - speed_rpm;
 
         // 加速度データをトップレベルに追加
-        doc["accel"]["x"] = round(accelX * 1000) / 1000.0; // 小数点以下3桁
+        doc["accel"]["x"] = round(accelX * 1000) / 1000.0;  // 小数点以下3桁
         doc["accel"]["y"] = round(accelY * 1000) / 1000.0;
         doc["accel"]["z"] = round(accelZ * 1000) / 1000.0;
 
@@ -672,17 +612,16 @@ void loop()
         doc["gyro"]["x"] = round(gyroX * 1000) / 1000.0;
         doc["gyro"]["y"] = round(gyroY * 1000) / 1000.0;
         doc["gyro"]["raw_z"] =
-            round(gyroZ * 1000) / 1000.0; // IMUのジャイロZ値(deg/s)
+            round(gyroZ * 1000) / 1000.0;  // IMUのジャイロZ値(deg/s)
         doc["gyro"]["z"] =
-            round(speed_deg * 1000) / 1000.0; // モーターRPM->deg/s変換値
+            round(speed_deg * 1000) / 1000.0;  // モーターRPM->deg/s変換値
 
         // タイムスタンプを追加
         doc["timestamp"] = millis();
         doc["counter"] = counter;
 
         // UDP送信（WiFi接続時のみ）
-        if (wifiConnected && WiFi.status() == WL_CONNECTED)
-        {
+        if (wifiConnected && WiFi.status() == WL_CONNECTED) {
           String jsonString;
           serializeJson(doc, jsonString);
 
@@ -693,8 +632,7 @@ void loop()
 
 #ifdef SERIAL_DEBUG_MODE
         // JSON形式での出力
-        if (!(i % 100))
-        { // 出力頻度制限
+        if (!(i % 100)) {  // 出力頻度制限
           // JSONドキュメントを作成
 
           // JSONを出力
