@@ -47,6 +47,82 @@ float gyroX, gyroY, gyroZ;
 
 constexpr int motor_id = 1;
 
+// 測定済みの電流-RPMマッピングデータ
+static const float mapping_current[] = {
+    0.0,  0.1,  0.2,  0.3,  0.4,  0.5,  0.6,  0.7,  0.8,  0.9,  1.0,  1.2,
+    1.4,  1.6,  1.8,  2.0,  2.5,  3.0,  -0.1, -0.2, -0.3, -0.4, -0.5, -0.6,
+    -0.7, -0.8, -0.9, -1.0, -1.2, -1.4, -1.6, -1.8, -2.0, -2.5, -3.0};
+
+static const float mapping_rpm[] = {
+    0.00,   0.00,   0.00,   0.00,   0.02,   0.08,   1.49,   4.68,  6.72,
+    8.91,   11.65,  17.05,  22.74,  29.08,  34.89,  41.38,  56.11, 72.33,
+    0.00,   -0.00,  -0.01,  -0.02,  -0.09,  -1.30,  -3.35,  -4.91, -7.42,
+    -10.29, -14.45, -20.66, -25.99, -31.43, -37.67, -51.54, -66.49};
+
+static const int mapping_size = sizeof(mapping_current) / sizeof(float);
+
+// RPMから電流値を線形補間で計算する関数
+float rpmToCurrent(float target_rpm) {
+  // 範囲チェック
+  float min_rpm = -66.49;  // 最小RPM
+  float max_rpm = 72.33;   // 最大RPM
+
+  if (target_rpm > max_rpm) target_rpm = max_rpm;
+  if (target_rpm < min_rpm) target_rpm = min_rpm;
+
+  // 0付近の不感帯処理
+  if (abs(target_rpm) < 0.1) {
+    return 0.0;
+  }
+
+  // 正方向と負方向で分けて処理
+  if (target_rpm > 0) {
+    // 正方向の線形補間
+    for (int i = 0; i < 18; i++) {  // 正方向データは0-17番目
+      if (mapping_rpm[i] >= target_rpm) {
+        if (i == 0 || mapping_rpm[i - 1] == mapping_rpm[i]) {
+          return mapping_current[i];
+        }
+
+        // 線形補間
+        float ratio = (target_rpm - mapping_rpm[i - 1]) /
+                      (mapping_rpm[i] - mapping_rpm[i - 1]);
+        return mapping_current[i - 1] +
+               ratio * (mapping_current[i] - mapping_current[i - 1]);
+      }
+    }
+    return mapping_current[17];  // 最大値
+  } else {
+    // 負方向の線形補間
+    for (int i = 18; i < mapping_size; i++) {  // 負方向データは18-34番目
+      if (mapping_rpm[i] <= target_rpm) {      // 負の値なので <=
+        if (i == 18 || mapping_rpm[i - 1] == mapping_rpm[i]) {
+          return mapping_current[i];
+        }
+
+        // 線形補間
+        float ratio = (target_rpm - mapping_rpm[i - 1]) /
+                      (mapping_rpm[i] - mapping_rpm[i - 1]);
+        return mapping_current[i - 1] +
+               ratio * (mapping_current[i] - mapping_current[i - 1]);
+      }
+    }
+    return mapping_current[mapping_size - 1];  // 最小値
+  }
+}
+
+// 簡易的なRPM制御関数（PIDの代替）
+float simpleRpmControl(float current_rpm, float target_rpm) {
+  static float integral_error = 0.0;
+  static float previous_error = 0.0;
+  static unsigned long last_time = 0;
+
+  // 基本的な電流値を線形補間で取得
+  float base_current = rpmToCurrent(target_rpm);
+
+  return base_current;
+}
+
 // PID制御パラメータ（振動を抑えるために調整）
 #ifdef NO_LOAD_DEBUG_MODE
 // 負荷なしデバッグモードではPID制御を無効化
@@ -535,7 +611,7 @@ void loop() {
     //     }
 
     if (millis() - lastMotorCommand >= COMMAND_SEND_INTERVAL) {
-      current_output = pid_control(current_rpm, target_rpm);
+      current_output = simpleRpmControl(current_rpm, target_rpm);
       send_cur(current_output);
       lastMotorCommand = millis();
     }
@@ -615,6 +691,8 @@ void loop() {
             round(gyroZ * 1000) / 1000.0;  // IMUのジャイロZ値(deg/s)
         doc["gyro"]["z"] =
             round(speed_deg * 1000) / 1000.0;  // モーターRPM->deg/s変換値
+
+        // Serial.printf("accel: %f\n", (float)doc["accel"]["x"]);
 
         // タイムスタンプを追加
         doc["timestamp"] = millis();
