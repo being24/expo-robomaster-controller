@@ -47,6 +47,82 @@ float gyroX, gyroY, gyroZ;
 
 constexpr int motor_id = 1;
 
+// 測定済みの電流-RPMマッピングデータ
+static const float mapping_current[] = {
+    0.0,  0.1,  0.2,  0.3,  0.4,  0.5,  0.6,  0.7,  0.8,  0.9,  1.0,  1.2,
+    1.4,  1.6,  1.8,  2.0,  2.5,  3.0,  -0.1, -0.2, -0.3, -0.4, -0.5, -0.6,
+    -0.7, -0.8, -0.9, -1.0, -1.2, -1.4, -1.6, -1.8, -2.0, -2.5, -3.0};
+
+static const float mapping_rpm[] = {
+    0.00,   0.00,   0.00,   0.00,   0.02,   0.08,   1.49,   4.68,  6.72,
+    8.91,   11.65,  17.05,  22.74,  29.08,  34.89,  41.38,  56.11, 72.33,
+    0.00,   -0.00,  -0.01,  -0.02,  -0.09,  -1.30,  -3.35,  -4.91, -7.42,
+    -10.29, -14.45, -20.66, -25.99, -31.43, -37.67, -51.54, -66.49};
+
+static const int mapping_size = sizeof(mapping_current) / sizeof(float);
+
+// RPMから電流値を線形補間で計算する関数
+float rpmToCurrent(float target_rpm) {
+  // 範囲チェック
+  float min_rpm = -66.49;  // 最小RPM
+  float max_rpm = 72.33;   // 最大RPM
+
+  if (target_rpm > max_rpm) target_rpm = max_rpm;
+  if (target_rpm < min_rpm) target_rpm = min_rpm;
+
+  // 0付近の不感帯処理
+  if (abs(target_rpm) < 0.1) {
+    return 0.0;
+  }
+
+  // 正方向と負方向で分けて処理
+  if (target_rpm > 0) {
+    // 正方向の線形補間
+    for (int i = 0; i < 18; i++) {  // 正方向データは0-17番目
+      if (mapping_rpm[i] >= target_rpm) {
+        if (i == 0 || mapping_rpm[i - 1] == mapping_rpm[i]) {
+          return mapping_current[i];
+        }
+
+        // 線形補間
+        float ratio = (target_rpm - mapping_rpm[i - 1]) /
+                      (mapping_rpm[i] - mapping_rpm[i - 1]);
+        return mapping_current[i - 1] +
+               ratio * (mapping_current[i] - mapping_current[i - 1]);
+      }
+    }
+    return mapping_current[17];  // 最大値
+  } else {
+    // 負方向の線形補間
+    for (int i = 18; i < mapping_size; i++) {  // 負方向データは18-34番目
+      if (mapping_rpm[i] <= target_rpm) {      // 負の値なので <=
+        if (i == 18 || mapping_rpm[i - 1] == mapping_rpm[i]) {
+          return mapping_current[i];
+        }
+
+        // 線形補間
+        float ratio = (target_rpm - mapping_rpm[i - 1]) /
+                      (mapping_rpm[i] - mapping_rpm[i - 1]);
+        return mapping_current[i - 1] +
+               ratio * (mapping_current[i] - mapping_current[i - 1]);
+      }
+    }
+    return mapping_current[mapping_size - 1];  // 最小値
+  }
+}
+
+// 簡易的なRPM制御関数（PIDの代替）
+float simpleRpmControl(float current_rpm, float target_rpm) {
+  static float integral_error = 0.0;
+  static float previous_error = 0.0;
+  static unsigned long last_time = 0;
+
+  // 基本的な電流値を線形補間で取得
+  float base_current = rpmToCurrent(target_rpm);
+
+  return base_current;
+}
+
 // PID制御パラメータ（振動を抑えるために調整）
 #ifdef NO_LOAD_DEBUG_MODE
 // 負荷なしデバッグモードではPID制御を無効化
@@ -54,18 +130,18 @@ float kp = 0.005;  // 比例ゲイン（無効化）
 float ki = 0.1;    // 積分ゲイン（無効化）
 float kd = 0.0;    // 微分ゲイン（無効化）
 #else
-// float kp = 0.01;  // 比例ゲイン
-float kp = 0.15;  // 比例ゲイン
-// float ki = 0.1;  // 積分ゲイン
-float ki = 1.5;   // 積分ゲイン
-float kd = 0.002;  // 微分ゲイン
+float kp = 0.01;  // 比例ゲイン
+// float kp = 0.005;  // 比例ゲイン
+float ki = 0.1;  // 積分ゲイン
+// float ki = 0.0;   // 積分ゲイン
+float kd = 0.0;  // 微分ゲイン
 #endif
 
 // minimum current
-float min_current = 0.3;  // 最小出力しきい値（摩擦を超えるための値）
+float min_current = 0.5;  // 最小出力しきい値（摩擦を超えるための値）
 
 // 0とみなす
-float zero_threshold = 0.01;
+float zero_threshold = 0.05;
 
 bool is_running = false;  // モーター動作フラグ
 bool is_take = false;     // 取得フラグ
@@ -91,8 +167,19 @@ float latest_angular_velocity = 0.0;
 bool latest_is_running = false;
 bool latest_is_take = false;
 
+// 角度からRPM計算用（メモリ節約型）
+static float prev_angle = 0.0;
+static unsigned long prev_time = 0;
+static bool angle_calc_initialized = false;
+
+// RPM移動平均フィルター（5点平均）
+#define RPM_FILTER_SIZE 5
+static float rpm_buffer[RPM_FILTER_SIZE] = {0};
+static int rpm_buffer_idx = 0;
+static bool rpm_buffer_full = false;
+
 // UDP受信タスク
-void udpReceiveTask(void* parameter) {
+void udpReceiveTask(void *parameter) {
   while (true) {
     int packetSize = commandUdp.parsePacket();
     if (packetSize) {
@@ -168,6 +255,53 @@ void processUdpCommand() {
   }
 }
 
+// 角度から瞬間RPMを計算（メモリ節約型）
+float calculateInstantRpm(float current_angle, unsigned long current_time) {
+  if (!angle_calc_initialized) {
+    prev_angle = current_angle;
+    prev_time = current_time;
+    angle_calc_initialized = true;
+    return 0.0;
+  }
+
+  unsigned long time_diff = current_time - prev_time;
+  if (time_diff == 0) return 0.0;
+
+  // 角度差計算（360度リセット対策）
+  float angle_diff = current_angle - prev_angle;
+  if (angle_diff > 180.0)
+    angle_diff -= 360.0;  // 1°→359° の場合
+  else if (angle_diff < -180.0)
+    angle_diff += 360.0;  // 359°→1° の場合
+
+  // 瞬間RPM計算: deg/ms * 1000ms/s * 60s/min / 360deg/rev
+  float instant_rpm = (angle_diff / (float)time_diff) * 1000.0 * 60.0 / 360.0;
+
+  // 次回計算のため更新（メモリ節約のため積算しない）
+  prev_angle = current_angle;
+  prev_time = current_time;
+
+  return instant_rpm;
+}
+
+// RPM移動平均フィルター
+float applyRpmFilter(float new_rpm) {
+  rpm_buffer[rpm_buffer_idx] = new_rpm;
+  rpm_buffer_idx = (rpm_buffer_idx + 1) % RPM_FILTER_SIZE;
+
+  if (!rpm_buffer_full && rpm_buffer_idx == 0) {
+    rpm_buffer_full = true;
+  }
+
+  float sum = 0.0;
+  int count = rpm_buffer_full ? RPM_FILTER_SIZE : rpm_buffer_idx;
+  for (int i = 0; i < count; i++) {
+    sum += rpm_buffer[i];
+  }
+
+  return sum / count;
+}
+
 float pid_control(float current_rpm, float target_rpm) {
   // is_runningがfalseの場合はモーター停止
   if (!is_running) {
@@ -227,7 +361,7 @@ float pid_control(float current_rpm, float target_rpm) {
   float output = kp * error + ki * integral_error + kd * derivative_error;
 
   // フィードフォワード項（速度比例）
-  float feedforward = target_rpm * 0.01f;
+  float feedforward = target_rpm * 0.005f;
   output += feedforward;
 
   // 最小出力しきい値（摩擦を超える）
@@ -475,7 +609,7 @@ void loop() {
     //     }
 
     if (millis() - lastMotorCommand >= COMMAND_SEND_INTERVAL) {
-      current_output = pid_control(current_rpm, target_rpm);
+      current_output = simpleRpmControl(current_rpm, target_rpm);
       send_cur(current_output);
       lastMotorCommand = millis();
     }
@@ -512,19 +646,28 @@ void loop() {
 
         // --- 正規化 ---
         float angle_deg = mech_angle * 360.0f / 8192.0f;
-        float speed_rpm = speed;  // RPM値
-        float speed_deg =
-            -speed *
-            6.0f;  // RPM -> deg/s変換 (RPM * 360deg/60s = RPM * 6) 軸反転
+        float speed_rpm_raw = speed;  // モーターから直接取得したRPM
+
+        // 角度から瞬間RPMを計算
+        float instant_rpm = calculateInstantRpm(angle_deg, millis());
+
+        // 移動平均フィルターを適用
+        float speed_rpm = applyRpmFilter(instant_rpm);
+
+        float speed_deg = -speed_rpm * 6.0f;  // 角度計算RPM -> deg/s変換 (RPM *
+                                              // 360deg/60s = RPM * 6) 軸反転
         float current_A = torque / 2048.0f;
 
-        // PID制御のために現在のRPMを更新
+        // PID制御のために角度計算RPMを使用
         current_rpm = speed_rpm;
 
         // モーターデータを追加
         doc["motor"]["current"] = current_A;
         doc["motor"]["angle"] = angle_deg;
-        doc["motor"]["speed"] = speed_rpm;
+        doc["motor"]["speed"] = speed_rpm;          // 角度計算RPM（移動平均後）
+        doc["motor"]["speed_raw"] = speed_rpm_raw;  // モーター直接取得RPM
+        doc["motor"]["speed_instant"] =
+            instant_rpm;  // 瞬間角度計算RPM（フィルター前）
         doc["motor"]["torque"] = torque;
         doc["motor"]["temp"] = temp;
 
@@ -547,6 +690,8 @@ void loop() {
         doc["gyro"]["z"] =
             round(speed_deg * 1000) / 1000.0;  // モーターRPM->deg/s変換値
 
+        // Serial.printf("accel: %f\n", (float)doc["accel"]["x"]);
+
         // タイムスタンプを追加
         doc["timestamp"] = millis();
         doc["counter"] = counter;
@@ -563,7 +708,7 @@ void loop() {
 
 #ifdef SERIAL_DEBUG_MODE
         // JSON形式での出力
-        if (!(i % 10)) {  // 出力頻度制限
+        if (!(i % 100)) {  // 出力頻度制限
           // JSONドキュメントを作成
 
           // JSONを出力
