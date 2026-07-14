@@ -29,5 +29,5 @@ echo "Using sketch file: $INO_FILE"
 arduino-cli compile \
   --fqbn "$FQBN" \
   --build-path "$ROOT_DIR/Build" \
-  --verbose \
+  --jobs 0 \
   "$ROOT_DIR/$INO_FILE"

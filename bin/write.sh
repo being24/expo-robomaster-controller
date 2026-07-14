@@ -30,7 +30,7 @@ echo "Uploading with FQBN: $FQBN, sketch: $INO_FILE"
 arduino-cli compile \
   --fqbn "$FQBN" \
   --build-path "$ROOT_DIR/Build" \
+  --jobs 0 \
   --upload \
   --port "$PORT" \
-  --verbose \
   "$ROOT_DIR/$INO_FILE"
