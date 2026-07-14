@@ -1,45 +1,70 @@
-#include <ArduinoJson.h>        // JSONデータのシリアライズ・デシリアライズライブラリ
-#include <M5Unified.h>          // M5Stack本体の共通制御ライブラリ（ディスプレイ・IMU等）
-#include <WiFi.h>               // ESP32のWiFi接続ライブラリ
-#include <WiFiUdp.h>            // UDP通信ライブラリ
-#include <freertos/FreeRTOS.h>  // FreeRTOSマルチタスクの基本ライブラリ
-#include <freertos/semphr.h>    // FreeRTOSのセマフォ・ミューテックスライブラリ（排他制御用）
-#include <freertos/task.h>      // FreeRTOSのタスク管理ライブラリ
+#include <ArduinoJson.h>
+#include <ETH.h>
+#include <M5Unified.h>
+#include <Network.h>
+#include <NetworkUdp.h>
+#include <SPI.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <freertos/task.h>
 
-// ※要確認: この行の意図が把握できていません
-#define SERIAL_DEBUG_MODE  // ※要確認: ESP32-TWAI-CANのインクルード前にdefineが必要な理由が把握できていません
+// airi
+#define SERIAL_DEBUG_MODE
 #define ENABLE_DISPLAY
 // #define UDP_LOG_MODE
-
-#include <ESP32-TWAI-CAN.hpp>  // ESP32のCAN（TWAI）通信ライブラリ
-
-#include "wifi_config.h"  // WiFi設定を別ファイルから読み込み
-
-#define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力（※line 10で既に定義済み、再定義の意図が把握できていません）
-// #define DEV_DEBUG_MOE     // 開発用デバッグ出力（受信IDなど）
-#define WIFI_DEBUG_MODE  // WiFiスキャンとネットワーク情報の表示
+// #define DEV_DEBUG_MODE      // 開発用デバッグ出力（受信IDなど）
 // #define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
 
-// AtomS3 Port A + M5Stack Unit CAN (U085)
+#include <ESP32-TWAI-CAN.hpp>
+
+#include "wifi_config.h"  // 既存の UDP_TARGET_IP / RECEIVE_UDP_PORT / POST_UDP_PORT を流用
+
+// =========================
+// AtomS3 / CAN
+// =========================
 #define CAN_TX 2
 #define CAN_RX 1
 
-#define BASE_ID 0x204  // RoboMasterモーターのベースCAN受信ID（motor_id=1 → 受信ID=0x205）
+#define BASE_ID 0x204
 
 // コマンドの送信間隔
 #define COMMAND_SEND_INTERVAL 20  // ms
-#define LOOP_INTERVAL 10          // メインループの1回あたりの待機時間（ms）
+#define LOOP_INTERVAL 10
 
-CanFrame rxFrame;  // CAN受信フレームの一時格納バッファ
+// W5500 LAN (SPI) - AtomS3
+// G5  -> SCK
+// G6  -> CS
+// G7  -> MISO
+// G8  -> MOSI
 
-WiFiUDP udp;                   // センサーデータ送信用UDPソケット
-WiFiUDP commandUdp;            // コマンド受信用
-bool wifiConnected = false;    // WiFi接続済みフラグ（UDP送信の可否判断に使用）
+#define ETH_PHY_TYPE ETH_PHY_W5500
+#define ETH_PHY_ADDR 1
+#define ETH_PHY_CS 6
+#define ETH_PHY_IRQ -1
+#define ETH_PHY_RST -1
 
-// const int RECEIVE_UDP_PORT = 8887;  // コマンド受信ポート
+#define ETH_SPI_SCK 5
+#define ETH_SPI_MISO 7
+#define ETH_SPI_MOSI 8
 
-int counter = 0;                     // CAN受信フレームのカウンタ（JSON送信に含める）
-bool data_size_error_flag_ = false;  // 受信データ長が8バイトでない場合のエラーフラグ
+static volatile bool lanLinkUp = false;
+static volatile bool lanHasIP = false;
+static volatile bool networkReady = false;
+static volatile bool udpCommandServerStarted = false;
+static volatile bool udpSendSocketStarted = false;
+static volatile bool ethNeedsSocketSync = true;
+
+#define DISPLAY_REFRESH_INTERVAL 200  // 200ms = 5Hz
+#define DISPLAY_BRIGHTNESS 48         // 先保守一点，0~255
+
+CanFrame rxFrame;
+
+NetworkUDP udp;
+NetworkUDP commandUdp;  // コマンド受信用（ETH 上で使用）
+IPAddress currentBoundIP(0, 0, 0, 0);
+
+int counter = 0;
+bool data_size_error_flag_ = false;
 
 // IMU data variables
 float accelX, accelY, accelZ;
@@ -59,94 +84,75 @@ static const float mapping_rpm[] = {
     0.00,   -0.00,  -0.01,  -0.02,  -0.09,  -1.30,  -3.35,  -4.91, -7.42,
     -10.29, -14.45, -20.66, -25.99, -31.43, -37.67, -51.54, -66.49};
 
-static const int mapping_size = sizeof(mapping_current) / sizeof(float);  // マッピングデータの総要素数（正方向18 + 負方向17 = 35）
+static const int mapping_size = sizeof(mapping_current) / sizeof(float);
 
 // RPMから電流値を線形補間で計算する関数
 float rpmToCurrent(float target_rpm) {
-  // 範囲チェック
-  float min_rpm = -66.49;  // 最小RPM
-  float max_rpm = 72.33;   // 最大RPM
+  float min_rpm = -66.49;
+  float max_rpm = 72.33;
 
   if (target_rpm > max_rpm) target_rpm = max_rpm;
   if (target_rpm < min_rpm) target_rpm = min_rpm;
 
-  // 0付近の不感帯処理（0.1 RPM未満はゼロとみなす）
   if (abs(target_rpm) < 0.1) {
     return 0.0;
   }
 
-  // 正方向と負方向で分けて処理
   if (target_rpm > 0) {
-    // 正方向の線形補間
-    for (int i = 0; i < 18; i++) {  // 正方向データはインデックス0〜17
+    for (int i = 0; i < 18; i++) {
       if (mapping_rpm[i] >= target_rpm) {
         if (i == 0 || mapping_rpm[i - 1] == mapping_rpm[i]) {
           return mapping_current[i];
         }
 
-        // 線形補間
         float ratio = (target_rpm - mapping_rpm[i - 1]) /
                       (mapping_rpm[i] - mapping_rpm[i - 1]);
         return mapping_current[i - 1] +
                ratio * (mapping_current[i] - mapping_current[i - 1]);
       }
     }
-    return mapping_current[17];  // 最大値
+    return mapping_current[17];
   } else {
-    // 負方向の線形補間
-    for (int i = 18; i < mapping_size; i++) {  // 負方向データはインデックス18〜34
-      if (mapping_rpm[i] <= target_rpm) {      // 負の値なので <=
+    for (int i = 18; i < mapping_size; i++) {
+      if (mapping_rpm[i] <= target_rpm) {
         if (i == 18 || mapping_rpm[i - 1] == mapping_rpm[i]) {
           return mapping_current[i];
         }
 
-        // 線形補間
         float ratio = (target_rpm - mapping_rpm[i - 1]) /
                       (mapping_rpm[i] - mapping_rpm[i - 1]);
         return mapping_current[i - 1] +
                ratio * (mapping_current[i] - mapping_current[i - 1]);
       }
     }
-    return mapping_current[mapping_size - 1];  // 最小値
+    return mapping_current[mapping_size - 1];
   }
 }
 
 // 簡易的なRPM制御関数（PIDの代替）
 float simpleRpmControl(float current_rpm, float target_rpm) {
-  // ※これらの変数は現在未使用（PID拡張用として残されていると推測）
-  static float integral_error = 0.0;
-  static float previous_error = 0.0;
-  static unsigned long last_time = 0;
-
-  // 基本的な電流値を線形補間で取得
+  (void)current_rpm;
   float base_current = rpmToCurrent(target_rpm);
-
   return base_current;
 }
 
-// PID制御パラメータ（振動を抑えるために調整）
+// PID制御パラメータ
 #ifdef NO_LOAD_DEBUG_MODE
-// 負荷なしデバッグモードではPID制御を無効化
-float kp = 0.005;  // 比例ゲイン（無効化）
-float ki = 0.1;    // 積分ゲイン（無効化）
-float kd = 0.0;    // 微分ゲイン（無効化）
+float kp = 0.005;
+float ki = 0.1;
+float kd = 0.0;
 #else
-float kp = 0.01;  // 比例ゲイン
-// float kp = 0.005;  // 比例ゲイン
-float ki = 0.1;  // 積分ゲイン
-// float ki = 0.0;   // 積分ゲイン
-float kd = 0.0;  // 微分ゲイン
+float kp = 0.01;
+float ki = 0.1;
+float kd = 0.0;
 #endif
 
-// minimum current
-float min_current = 0.5;  // 最小出力電流（A）：モーターの静止摩擦を超えるために必要な最低値
-
-// 0とみなす
+float min_current = 0.5;
 float zero_threshold = 0.05;
 
-bool is_running = false;  // モーター動作フラグ
-bool is_take = false;     // 取得フラグ
-float target_rpm = 0.0;   // 目標RPM（初期値）
+bool is_running = false;
+bool is_take = false;
+float target_rpm = 0.0;
 float integral_error = 0.0;
 float previous_error = 0.0;
 unsigned long last_pid_time = 0;
@@ -159,19 +165,20 @@ unsigned long last_pid_time = 0;
 
 // json
 StaticJsonDocument<300> doc;
-StaticJsonDocument<200> commandDoc;  // コマンド受信用
+StaticJsonDocument<200> commandDoc;
 
 // UDP受信タスク用変数
-SemaphoreHandle_t udpDataMutex;          // UDPデータへのアクセスを排他制御するFreeRTOSミューテックス
-bool newUdpDataAvailable = false;        // 未処理の新規UDPデータが存在することを示すフラグ
+SemaphoreHandle_t udpDataMutex;
+SemaphoreHandle_t udpSocketMutex;
+bool newUdpDataAvailable = false;
 float latest_angular_velocity = 0.0;
 bool latest_is_running = false;
 bool latest_is_take = false;
 
-// 角度からRPM計算用（メモリ節約型）
-static float prev_angle = 0.0;               // 直前フレームのモーター角度（RPM計算に使用）
-static unsigned long prev_time = 0;          // 直前フレームのタイムスタンプ（ms）
-static bool angle_calc_initialized = false;  // 瞬間RPM計算の初回スキップフラグ
+// 角度からRPM計算用
+static float prev_angle = 0.0;
+static unsigned long prev_time = 0;
+static bool angle_calc_initialized = false;
 
 // RPM移動平均フィルター（5点平均）
 #define RPM_FILTER_SIZE 5
@@ -179,28 +186,214 @@ static float rpm_buffer[RPM_FILTER_SIZE] = {0};
 static int rpm_buffer_idx = 0;
 static bool rpm_buffer_full = false;
 
-// FreeRTOSタスク：UDPポートを常時監視してコマンドを受信する
-void udpReceiveTask(void *parameter) {
+// =========================
+// Ethernet event handler
+// =========================
+void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
+  (void)info;
+
+  switch (event) {
+    case ARDUINO_EVENT_ETH_START:
+#ifdef SERIAL_DEBUG_MODE
+      Serial.println("ETH Started");
+#endif
+      ETH.setHostname("atoms3-eth");
+      break;
+
+    case ARDUINO_EVENT_ETH_CONNECTED:
+      lanLinkUp = true;
+#ifdef SERIAL_DEBUG_MODE
+      Serial.println("ETH Link Up");
+#endif
+      break;
+
+    case ARDUINO_EVENT_ETH_GOT_IP:
+      lanLinkUp = true;
+      lanHasIP = true;
+      networkReady = true;
+      ethNeedsSocketSync = true;
+#ifdef SERIAL_DEBUG_MODE
+      Serial.print("ETH IP: ");
+      Serial.println(ETH.localIP());
+#endif
+      break;
+
+    case ARDUINO_EVENT_ETH_LOST_IP:
+      lanHasIP = false;
+      networkReady = false;
+      ethNeedsSocketSync = true;
+#ifdef SERIAL_DEBUG_MODE
+      Serial.println("ETH Lost IP");
+#endif
+      break;
+
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
+      lanLinkUp = false;
+      lanHasIP = false;
+      networkReady = false;
+      ethNeedsSocketSync = true;
+#ifdef SERIAL_DEBUG_MODE
+      Serial.println("ETH Disconnected");
+#endif
+      break;
+
+    case ARDUINO_EVENT_ETH_STOP:
+      lanLinkUp = false;
+      lanHasIP = false;
+      networkReady = false;
+      ethNeedsSocketSync = true;
+#ifdef SERIAL_DEBUG_MODE
+      Serial.println("ETH Stopped");
+#endif
+      break;
+
+    default:
+      break;
+  }
+}
+
+bool isValidIP(const IPAddress& ip) {
+  return (ip[0] != 0 || ip[1] != 0 || ip[2] != 0 || ip[3] != 0);
+}
+
+void stopUdpSocketsUnlocked() {
+  if (udpCommandServerStarted) {
+    commandUdp.stop();
+    udpCommandServerStarted = false;
+#ifdef SERIAL_DEBUG_MODE
+    Serial.println("UDP command server stopped");
+#endif
+  }
+
+  if (udpSendSocketStarted) {
+    udp.stop();
+    udpSendSocketStarted = false;
+#ifdef SERIAL_DEBUG_MODE
+    Serial.println("UDP sender socket stopped");
+#endif
+  }
+
+  currentBoundIP = IPAddress(0, 0, 0, 0);
+}
+
+void stopUdpSockets() {
+  if (xSemaphoreTake(udpSocketMutex, portMAX_DELAY) == pdTRUE) {
+    stopUdpSocketsUnlocked();
+    xSemaphoreGive(udpSocketMutex);
+  }
+}
+
+void startUdpSockets(const IPAddress& ip) {
+  if (xSemaphoreTake(udpSocketMutex, portMAX_DELAY) != pdTRUE) {
+    return;
+  }
+
+  stopUdpSocketsUnlocked();
+
+  bool rxOk = commandUdp.begin(RECEIVE_UDP_PORT);
+  bool txOk = udp.begin(SEND_UDP_PORT);
+
+  udpCommandServerStarted = rxOk;
+  udpSendSocketStarted = txOk;
+
+  if (rxOk && txOk) {
+    currentBoundIP = ip;
+    ethNeedsSocketSync = false;
+#ifdef SERIAL_DEBUG_MODE
+    Serial.print("UDP sockets bound on IP: ");
+    Serial.println(ip);
+    Serial.print("RX port: ");
+    Serial.println(RECEIVE_UDP_PORT);
+    Serial.print("TX local port: ");
+    Serial.println(SEND_UDP_PORT);
+#endif
+  } else {
+    ethNeedsSocketSync = true;
+#ifdef SERIAL_DEBUG_MODE
+    Serial.print("UDP socket bind failed. RX=");
+    Serial.print(rxOk ? "OK" : "NG");
+    Serial.print(" TX=");
+    Serial.println(txOk ? "OK" : "NG");
+#endif
+  }
+
+  xSemaphoreGive(udpSocketMutex);
+}
+
+void syncUdpSockets() {
+  static unsigned long lastRetryTime = 0;
+
+  if (!lanHasIP && isValidIP(ETH.localIP())) {
+    lanHasIP = true;
+    networkReady = true;
+    ethNeedsSocketSync = true;
+  }
+
+  IPAddress ip = ETH.localIP();
+  bool ipReady = lanHasIP && isValidIP(ip);
+
+  if (!ipReady) {
+    stopUdpSockets();
+    return;
+  }
+
+  bool ipChanged = (ip != currentBoundIP);
+
+  if (!ethNeedsSocketSync && !ipChanged && udpCommandServerStarted &&
+      udpSendSocketStarted) {
+    return;
+  }
+
+  if (millis() - lastRetryTime < 1000) {
+    return;
+  }
+  lastRetryTime = millis();
+
+  startUdpSockets(ip);
+}
+
+// UDP受信タスク
+void udpReceiveTask(void* parameter) {
+  (void)parameter;
+
   while (true) {
-    int packetSize = commandUdp.parsePacket();
+    if (!udpCommandServerStarted) {
+      vTaskDelay(10 / portTICK_PERIOD_MS);
+      continue;
+    }
+
+    char incomingPacket[256];
+    int len = 0;
+
+    if (xSemaphoreTake(udpSocketMutex, portMAX_DELAY) != pdTRUE) {
+      vTaskDelay(1);
+      continue;
+    }
+
+    int packetSize = 0;
+    if (udpCommandServerStarted) {
+      packetSize = commandUdp.parsePacket();
+      if (packetSize) {
+        len = commandUdp.read(incomingPacket, sizeof(incomingPacket) - 1);
+      }
+    }
+
+    xSemaphoreGive(udpSocketMutex);
+
     if (packetSize) {
 #ifdef UDP_LOG_MODE
       Serial.println(">>>> UDP Packet Received! <<<<");
 #endif
 
-      char incomingPacket[256];
-      int len = commandUdp.read(incomingPacket, 255);
       if (len > 0) {
         incomingPacket[len] = 0;
 #ifdef UDP_LOG_MODE
         Serial.printf("Received Data: %s\n", incomingPacket);
 #endif
 
-        // JSONをパース
         DeserializationError receive_data =
             deserializeJson(commandDoc, incomingPacket);
         if (!receive_data) {
-          // ミューテックスでデータを保護
           if (xSemaphoreTake(udpDataMutex, portMAX_DELAY)) {
             if (commandDoc.containsKey("angular_velocity")) {
               latest_angular_velocity = commandDoc["angular_velocity"];
@@ -222,16 +415,14 @@ void udpReceiveTask(void *parameter) {
         }
       }
     }
-    vTaskDelay(1);  // 1ms待機
+    vTaskDelay(1);
   }
 }
 
 void processUdpCommand() {
-  // 新しいUDPデータがあるかチェック
   if (xSemaphoreTake(udpDataMutex, 0) == pdTRUE) {
     if (newUdpDataAvailable) {
-      // 最新データを適用
-      target_rpm = latest_angular_velocity * 9.5493;  // rad/s → RPM に変換（1 rad/s = 60/(2π) ≒ 9.5493 RPM）
+      target_rpm = latest_angular_velocity * 9.5493;  // rad/s -> RPM
       is_take = latest_is_take;
       is_running = latest_is_running;
 
@@ -239,7 +430,7 @@ void processUdpCommand() {
 
 #ifdef SERIAL_DEBUG_MODE
       static unsigned long lastUdpDebugTime = 0;
-      if (millis() - lastUdpDebugTime >= 1000) {  // 1秒間隔で出力制限
+      if (millis() - lastUdpDebugTime >= 1000) {
         Serial.print("UDP Command Applied - angular_velocity=");
         Serial.print(latest_angular_velocity);
         Serial.print(" rad/s, target_rpm=");
@@ -256,7 +447,7 @@ void processUdpCommand() {
   }
 }
 
-// 角度エンコーダの差分から瞬間RPMを算出（メモリ節約のため累積せず前回値のみ保持）
+// 角度から瞬間RPMを計算
 float calculateInstantRpm(float current_angle, unsigned long current_time) {
   if (!angle_calc_initialized) {
     prev_angle = current_angle;
@@ -268,17 +459,14 @@ float calculateInstantRpm(float current_angle, unsigned long current_time) {
   unsigned long time_diff = current_time - prev_time;
   if (time_diff == 0) return 0.0;
 
-  // 角度差計算（360度リセット対策）
   float angle_diff = current_angle - prev_angle;
   if (angle_diff > 180.0)
-    angle_diff -= 360.0;  // 359°→0°方向の折り返しを補正
+    angle_diff -= 360.0;
   else if (angle_diff < -180.0)
-    angle_diff += 360.0;  // 0°→359°方向の折り返しを補正
+    angle_diff += 360.0;
 
-  // 瞬間RPM計算: deg/ms * 1000ms/s * 60s/min / 360deg/rev
   float instant_rpm = (angle_diff / (float)time_diff) * 1000.0 * 60.0 / 360.0;
 
-  // 次回計算のため更新（メモリ節約のため積算しない）
   prev_angle = current_angle;
   prev_time = current_time;
 
@@ -291,36 +479,32 @@ float applyRpmFilter(float new_rpm) {
   rpm_buffer_idx = (rpm_buffer_idx + 1) % RPM_FILTER_SIZE;
 
   if (!rpm_buffer_full && rpm_buffer_idx == 0) {
-    rpm_buffer_full = true;  // バッファが初めて一周した時点でフルフラグを立てる
+    rpm_buffer_full = true;
   }
 
   float sum = 0.0;
-  int count = rpm_buffer_full ? RPM_FILTER_SIZE : rpm_buffer_idx;  // バッファが未満杯の場合は現在のサンプル数で割る
+  int count = rpm_buffer_full ? RPM_FILTER_SIZE : rpm_buffer_idx;
   for (int i = 0; i < count; i++) {
     sum += rpm_buffer[i];
   }
 
-  return sum / count;
+  return (count > 0) ? (sum / count) : 0.0f;
 }
 
 float pid_control(float current_rpm, float target_rpm) {
-  // is_runningがfalseの場合はモーター停止
   if (!is_running) {
-    integral_error = 0.0;  // 停止時は積分項をリセット
+    integral_error = 0.0;
     return 0.0f;
   }
 
   unsigned long current_time = millis();
-  float dt = (current_time - last_pid_time) / 1000.0f;  // 前回のPID実行からの経過時間（秒）
+  float dt = (current_time - last_pid_time) / 1000.0f;
+  if (dt <= 0.0f) dt = 0.001f;
 
-  if (dt <= 0.0f) dt = 0.001f;  // dt=0による除算エラーを防ぐフォールバック
-
-  // 誤差計算
   float error = target_rpm - current_rpm;
 
-  // 【対策1】目標値変更時の積分項リセット
   static float previous_target_rpm = target_rpm;
-  if (abs(target_rpm - previous_target_rpm) > 0.5f) {  // 低速用に0.5RPMに変更
+  if (abs(target_rpm - previous_target_rpm) > 0.5f) {
     integral_error = 0.0;
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("Target changed - Integral reset");
@@ -328,44 +512,33 @@ float pid_control(float current_rpm, float target_rpm) {
   }
   previous_target_rpm = target_rpm;
 
-  // 【対策2】符号変化時の積分項リセット（ブレーキ判定）
   static float previous_error_sign = 0.0;
   float current_error_sign = (error > 0) ? 1.0 : (error < 0) ? -1.0 : 0.0;
   bool is_braking = (previous_error_sign != 0 && current_error_sign != 0 &&
                      previous_error_sign != current_error_sign);
 
   if (is_braking) {
-    integral_error = 0.0;  // ブレーキ時は積分項をリセット
+    integral_error = 0.0;
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("Braking detected - Integral reset");
 #endif
   }
   previous_error_sign = current_error_sign;
 
-  // 【対策3】ブレーキ時は積分更新を無効化、通常時は積分更新
-  if (is_braking) {
-    // ブレーキ時は積分更新しない
-    // integral_error += 0;  // 明示的に無効化
-  } else {
-    // 通常時は積分更新
+  if (!is_braking) {
     integral_error += error * dt;
   }
 
-  float max_integral = 100.0f;  // 積分ウィンドアップ防止の上限値
+  float max_integral = 100.0f;
   if (integral_error > max_integral) integral_error = max_integral;
   if (integral_error < -max_integral) integral_error = -max_integral;
 
-  // 微分項
   float derivative_error = (error - previous_error) / dt;
-
-  // PID出力計算
   float output = kp * error + ki * integral_error + kd * derivative_error;
 
-  // フィードフォワード：目標RPMの0.5%を加算して定常偏差を補助
   float feedforward = target_rpm * 0.005f;
   output += feedforward;
 
-  // 最小出力しきい値（摩擦を超える）
   if (output > -zero_threshold && output < zero_threshold)
     output = 0.0f;
   else if (output > 0.0f && output < min_current)
@@ -373,7 +546,6 @@ float pid_control(float current_rpm, float target_rpm) {
   else if (output < 0.0f && output > -min_current)
     output = -min_current;
 
-  // 出力制限（±3.0A以内）
   if (output > 3.0f) output = 3.0f;
   if (output < -3.0f) output = -3.0f;
 
@@ -384,35 +556,29 @@ float pid_control(float current_rpm, float target_rpm) {
 }
 
 void send_cur(float cur) {
-  constexpr float MAX_CUR_A = 3.0f;       // 最大±3A
-  constexpr int16_t MAX_CUR_VAL = 16384;  // ±16384 = 3A
-  constexpr uint32_t CAN_ID = 0x1FF;      // モーターID 1～4 に対応
+  constexpr float MAX_CUR_A = 3.0f;
+  constexpr int16_t MAX_CUR_VAL = 16384;
+  constexpr uint32_t CAN_ID = 0x1FF;
 
-  // 電流[A] → 指令値 [-16384, +16384] に変換
   float scaled = cur * (MAX_CUR_VAL / MAX_CUR_A);
   if (scaled > MAX_CUR_VAL) scaled = MAX_CUR_VAL;
   if (scaled < -MAX_CUR_VAL) scaled = -MAX_CUR_VAL;
   int16_t command = static_cast<int16_t>(scaled);
 
-  // CANフレーム作成
   CanFrame frame = {0};
   frame.identifier = CAN_ID;
-  frame.extd = 0;  // 標準フレーム（拡張フレームは不使用）
+  frame.extd = 0;
   frame.data_length_code = 8;
 
-  // 未使用バイトを念のため0クリア
   for (int i = 0; i < 8; i++) frame.data[i] = 0;
 
-  // モーターIDに対応するバイト位置に電流コマンドを格納（ID=1→0,1バイト目 / ID=2→2,3バイト目 ...）
   int byteIndex = (motor_id - 1) * 2;
-  frame.data[byteIndex] = (command >> 8) & 0xFF;  // 上位バイト
-  frame.data[byteIndex + 1] = command & 0xFF;     // 下位バイト
+  frame.data[byteIndex] = (command >> 8) & 0xFF;
+  frame.data[byteIndex + 1] = command & 0xFF;
 
-  // フレーム送信
   ESP32Can.writeFrame(frame);
 
 #ifdef DEV_DEBUG_MODE
-  // print frame for debugging
   Serial.print("Sending CAN ID: 0x");
   Serial.print(frame.identifier, HEX);
   Serial.print(" Current: ");
@@ -436,128 +602,144 @@ void readIMUData() {
   if (imu_update) {
     auto data = M5.Imu.getImuData();
 
-    // 加速度データを取得（単位: m/s²）
     accelX = data.accel.x;
     accelY = data.accel.y;
     accelZ = data.accel.z;
 
-    // 角速度データを取得（単位: deg/s）
     gyroX = data.gyro.x;
     gyroY = data.gyro.y;
     gyroZ = data.gyro.z;
   }
 }
 
+void updateDisplay() {
+  static unsigned long lastDisplayUpdate = 0;
+  if (millis() - lastDisplayUpdate < DISPLAY_REFRESH_INTERVAL) return;
+  lastDisplayUpdate = millis();
+
+  M5.Display.startWrite();
+  M5.Display.fillScreen(BLACK);
+  M5.Display.setCursor(0, 0);
+
+  M5.Display.printf("IP: %s\n\n", ETH.localIP().toString().c_str());
+  M5.Display.printf("LAN: %s / %s\n", lanLinkUp ? "LINK" : "DOWN",
+                    lanHasIP ? "IP OK" : "NO IP");
+  M5.Display.printf("Target RPM:\n %.2f\n", target_rpm);
+  M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
+  M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
+
+  M5.Display.endWrite();
+}
+
 void setup() {
-  auto cfg = M5.config();
-  M5.begin(cfg);  // AtomS3を初期化
-  M5.Display.setRotation(3);  // ※要確認: 回転方向（3=横向き？）の正確な意味が把握できていません
-  M5.Display.setTextFont(&fonts::Orbitron_Light_24);  // フォント指定（Orbitron Light 24px）
-  M5.Display.setTextSize(0.5);
-
-  // AtomS3初期化完了待ち（2秒）
-  delay(2000);
-
 #ifdef SERIAL_DEBUG_MODE
-  // Setup serial for debugging.
   Serial.begin(115200);
-  while (!Serial);
+  unsigned long serial_wait_start = millis();
+  while (!Serial && (millis() - serial_wait_start < 2000)) {
+    delay(10);
+  }
 #endif
 
-  // WiFiスキャンを実行
-#ifdef WIFI_DEBUG_MODE
-  Serial.println("Scanning for WiFi networks...");
+  auto cfg = M5.config();
+  M5.begin(cfg);
+  M5.Display.setRotation(3);
+  M5.Display.setTextFont(&fonts::Orbitron_Light_24);
+  M5.Display.setTextSize(0.5);
+  M5.Display.setBrightness(DISPLAY_BRIGHTNESS);  // 太亮了发热很严重
 
-  int numNetworks = WiFi.scanNetworks();
+  delay(500);
 
-  if (numNetworks == 0) {
-    Serial.println("No networks found");
-  } else {
-    Serial.print(numNetworks);
-    Serial.println(" networks found:");
+  // ミューテックス作成
+  udpDataMutex = xSemaphoreCreateMutex();
+  udpSocketMutex = xSemaphoreCreateMutex();
 
-    for (int i = 0; i < numNetworks; i++) {
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.print(WiFi.SSID(i));
-      Serial.print(" (");
-      Serial.print(WiFi.RSSI(i));
-      Serial.print(" dBm) ");
-      Serial.print(WiFi.encryptionType(i) == WIFI_AUTH_OPEN ? "Open"
-                                                            : "Encrypted");
-      Serial.println();
+  if (udpDataMutex == NULL || udpSocketMutex == NULL) {
+#ifdef SERIAL_DEBUG_MODE
+    Serial.println("Failed to create UDP mutex");
+#endif
+    while (1) {
+      delay(1000);
     }
   }
-  Serial.println();
+
+  // UDP受信タスクを作成
+  xTaskCreatePinnedToCore(udpReceiveTask, "UDPReceiveTask", 4096, NULL, 2, NULL,
+                          0);
+
+  // Ethernet(W5500) 初期化
+  SPI.begin(ETH_SPI_SCK, ETH_SPI_MISO, ETH_SPI_MOSI, ETH_PHY_CS);
+  SPI.setFrequency(10000000);  // 少し保守的に
+
+  Network.onEvent(onNetworkEvent);
+
+#ifdef SERIAL_DEBUG_MODE
+  Serial.println("Starting Ethernet (W5500 over SPI)...");
 #endif
 
-  // WiFi接続
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  if (!ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_CS, ETH_PHY_IRQ,
+                 ETH_PHY_RST, SPI)) {
 #ifdef SERIAL_DEBUG_MODE
-  Serial.print("Connecting to ");
-  Serial.print(WIFI_SSID);
-  Serial.print(" with password ");
-  Serial.println(WIFI_PASSWORD);
+    Serial.println("ETH.begin() failed!");
 #endif
+    while (1) {
+      delay(1000);
+    }
+  }
 
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
+  // 固定IP設定（DHCPを使わない）
+  if (USE_STATIC_IP) {
+    bool cfgOk = ETH.config(LOCAL_IP, LOCAL_GATEWAY, LOCAL_SUBNET, LOCAL_DNS1,
+                            LOCAL_DNS2);
 #ifdef SERIAL_DEBUG_MODE
-    Serial.print(".");
+    Serial.print("ETH.config(static IP) = ");
+    Serial.println(cfgOk ? "OK" : "NG");
 #endif
   }
 
-  wifiConnected = true;
+  // 起動時に少し待つ（固定IP反映 / DHCP取得待ち）
+  unsigned long eth_wait_start = millis();
+  while ((millis() - eth_wait_start < 5000)) {
+    syncUdpSockets();
+
+    if (USE_STATIC_IP) {
+      if (ETH.localIP() == LOCAL_IP) {
+        lanHasIP = true;
+        networkReady = true;
+        ethNeedsSocketSync = true;
+        break;
+      }
+    } else {
+      if (lanHasIP) {
+        break;
+      }
+    }
+
+    delay(50);
+  }
+
 #ifdef SERIAL_DEBUG_MODE
-  Serial.println();
-  Serial.println("WiFi connected!");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  Serial.print("UDP target IP: ");
-  Serial.println(UDP_TARGET_IP);
+  Serial.print("Ethernet local IP: ");
+  Serial.println(ETH.localIP());
 #endif
 
-  // UDP受信開始
-  commandUdp.begin(RECEIVE_UDP_PORT);
-#ifdef SERIAL_DEBUG_MODE
-  Serial.print("UDP command server started on port ");
-  Serial.println(RECEIVE_UDP_PORT);
-#endif
-
-  // UDPデータ保護用ミューテックスを作成
-  udpDataMutex = xSemaphoreCreateMutex();
-
-  // UDP受信タスクを作成
-  xTaskCreatePinnedToCore(udpReceiveTask,    // タスク関数
-                          "UDPReceiveTask",  // タスク名
-                          4096,              // スタックサイズ
-                          NULL,              // パラメータ
-                          2,                 // 優先度 (高め)
-                          NULL,              // タスクハンドル
-                          0                  // コア0で実行
-  );
-
-  // Set pins
+  // CAN 設定
   ESP32Can.setPins(CAN_TX, CAN_RX);
-
-  // CAN送受信キューのサイズ設定（デフォルト値）
   ESP32Can.setRxQueueSize(5);
   ESP32Can.setTxQueueSize(5);
-
-  // CANバス速度を1Mbpsに設定
   ESP32Can.setSpeed(ESP32Can.convertSpeed(1000));
 
-  // Initialize CAN bus
   if (ESP32Can.begin()) {
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("CAN bus started!");
-    Serial.println("JSON data output started");  // JSON format notice
+    Serial.println("JSON data output started");
 #endif
   } else {
 #ifdef SERIAL_DEBUG_MODE
     Serial.println("CAN bus failed!");
 #endif
-    while (1);
+    while (1) {
+      delay(1000);
+    }
   }
 }
 
@@ -565,24 +747,15 @@ void loop() {
   int i = 0;
 
   while (true) {
-    // IMUデータを読み取り
-    readIMUData();
+    syncUdpSockets();
 
-    // UDP コマンド受信処理
+    readIMUData();
     processUdpCommand();
 
-// ※要確認: この行の意図が把握できていません
 #ifdef ENABLE_DISPLAY
-    M5.Display.fillScreen(BLACK);
-    M5.Display.setCursor(0, 0);
-    M5.Display.printf("IP: %s\n\n", WiFi.localIP().toString().c_str());
-    M5.Display.printf("UDP Command:\n");
-    M5.Display.printf("Target RPM:\n %.2f\n", target_rpm);
-    M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
-    M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
+    updateDisplay();
 #endif
 
-    // モーター制御 - PID制御で目標RPMに制御
     static unsigned long lastMotorCommand = 0;
     static float current_output = 0.0;
     static float current_rpm = 0.0;
@@ -616,16 +789,13 @@ void loop() {
       lastMotorCommand = millis();
     }
 
-    // CAN受信処理（sample.txtの効率的な方式を採用）
     if (ESP32Can.readFrame(rxFrame, 1)) {
 #ifdef DEV_DEBUG_MODE
-      // 開発用デバッグ：受信したすべてのフレームIDを表示
       Serial.print("Received ID: 0x");
       Serial.print(rxFrame.identifier, HEX);
       Serial.print(" Expected: 0x");
       Serial.print(BASE_ID + motor_id, HEX);
 
-      // 受信データも表示
       Serial.print(" RawData: ");
       for (int j = 0; j < rxFrame.data_length_code; j++) {
         Serial.print("0x");
@@ -638,7 +808,7 @@ void loop() {
 
       if (rxFrame.identifier == BASE_ID + motor_id) {  // motor_id=1なので0x205
         counter++;
-        data_size_error_flag_ = (rxFrame.data_length_code != 8);  // 受信データが8バイトでない場合はエラーフラグを立てる
+        data_size_error_flag_ = (rxFrame.data_length_code != 8);
 
         // CANからの生データ取得
         uint16_t mech_angle = (rxFrame.data[0] << 8) | rxFrame.data[1];
@@ -647,7 +817,7 @@ void loop() {
         uint8_t temp = rxFrame.data[6];
 
         // --- 正規化 ---
-        float angle_deg = mech_angle * 360.0f / 8192.0f;  // 生の角度カウント（0〜8191）を0〜360°に変換
+        float angle_deg = mech_angle * 360.0f / 8192.0f;
         float speed_rpm_raw = speed;  // モーターから直接取得したRPM
 
         // 角度から瞬間RPMを計算
@@ -658,18 +828,17 @@ void loop() {
 
         float speed_deg = -speed_rpm * 6.0f;  // 角度計算RPM -> deg/s変換 (RPM *
                                               // 360deg/60s = RPM * 6) 軸反転
-        float current_A = torque / 2048.0f;  // ※要確認: トルクカウント→電流(A)の変換係数（2048の根拠が把握できていません）
+        float current_A = torque / 2048.0f;
 
-        // PID制御に使用するRPMを移動平均後の値で更新
+        // PID制御のために角度計算RPMを使用
         current_rpm = speed_rpm;
 
         // モーターデータを追加
         doc["motor"]["current"] = current_A;
         doc["motor"]["angle"] = angle_deg;
-        doc["motor"]["speed"] = speed_rpm;          // 角度計算RPM（移動平均後）
-        doc["motor"]["speed_raw"] = speed_rpm_raw;  // モーター直接取得RPM
-        doc["motor"]["speed_instant"] =
-            instant_rpm;  // 瞬間角度計算RPM（フィルター前）
+        doc["motor"]["speed"] = speed_rpm;
+        doc["motor"]["speed_raw"] = speed_rpm_raw;
+        doc["motor"]["speed_instant"] = instant_rpm;
         doc["motor"]["torque"] = torque;
         doc["motor"]["temp"] = temp;
 
@@ -680,40 +849,57 @@ void loop() {
         doc["control"]["error"] = target_rpm - speed_rpm;
 
         // 加速度データをトップレベルに追加
-        doc["accel"]["x"] = round(accelX * 1000) / 1000.0;  // 小数点以下3桁
+        doc["accel"]["x"] = round(accelX * 1000) / 1000.0;
         doc["accel"]["y"] = round(accelY * 1000) / 1000.0;
         doc["accel"]["z"] = round(accelZ * 1000) / 1000.0;
 
         // ジャイロデータをトップレベルに追加
         doc["gyro"]["x"] = round(gyroX * 1000) / 1000.0;
         doc["gyro"]["y"] = round(gyroY * 1000) / 1000.0;
-        doc["gyro"]["raw_z"] =
-            round(gyroZ * 1000) / 1000.0;  // IMUのジャイロZ値(deg/s)
-        doc["gyro"]["z"] =
-            round(speed_deg * 1000) / 1000.0;  // モーターRPM->deg/s変換値
-
-        // Serial.printf("accel: %f\n", (float)doc["accel"]["x"]);
+        doc["gyro"]["raw_z"] = round(gyroZ * 1000) / 1000.0;
+        doc["gyro"]["z"] = round(speed_deg * 1000) / 1000.0;
 
         // タイムスタンプを追加
         doc["timestamp"] = millis();
         doc["counter"] = counter;
 
-        // UDP送信（WiFi接続時のみ）
-        if (wifiConnected && WiFi.status() == WL_CONNECTED) {
-          String jsonString;
-          serializeJson(doc, jsonString);
+        // UDP送信（LAN接続時のみ）
+        if (lanHasIP && udpSendSocketStarted) {
+          char jsonBuffer[512];
+          size_t jsonLen = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
 
-          udp.beginPacket(UDP_TARGET_IP, POST_UDP_PORT);
-          udp.print(jsonString);
-          udp.endPacket();
+          if (jsonLen == 0 || jsonLen >= sizeof(jsonBuffer)) {
+#ifdef SERIAL_DEBUG_MODE
+            Serial.println("serializeJson failed or buffer too small");
+#endif
+          } else {
+            if (!udp.beginPacket(UDP_TARGET_IP, POST_UDP_PORT)) {
+#ifdef SERIAL_DEBUG_MODE
+              Serial.println("udp.beginPacket failed");
+#endif
+              udpSendSocketStarted = false;
+              ethNeedsSocketSync = true;
+            } else {
+              size_t written = udp.write((const uint8_t*)jsonBuffer, jsonLen);
+              if (written != jsonLen) {
+#ifdef SERIAL_DEBUG_MODE
+                Serial.println("udp.write size mismatch");
+#endif
+              }
+
+              if (!udp.endPacket()) {
+#ifdef SERIAL_DEBUG_MODE
+                Serial.println("udp.endPacket failed");
+#endif
+                udpSendSocketStarted = false;
+                ethNeedsSocketSync = true;
+              }
+            }
+          }
         }
 
 #ifdef SERIAL_DEBUG_MODE
-        // JSON形式での出力
-        if (!(i % 100)) {  // 100ループごとに1回だけシリアル出力（出力頻度制限）
-          // JSONドキュメントを作成
-
-          // JSONを出力
+        if (!(i % 100)) {
           serializeJson(doc, Serial);
           Serial.println();
         }
