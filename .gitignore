@@ -13,3 +13,4 @@ debug.txt
 .vscode/settings.json
 Build/
 *Zone.Identifier
+logs/**.txt
