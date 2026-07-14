@@ -1,45 +1,45 @@
-#include <ArduinoJson.h>
-#include <M5StickCPlus2.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
-#include <freertos/FreeRTOS.h>
-#include <freertos/semphr.h>
-#include <freertos/task.h>
+#include <ArduinoJson.h>        // JSONデータのシリアライズ・デシリアライズライブラリ
+#include <M5Unified.h>          // M5Stack本体の共通制御ライブラリ（ディスプレイ・IMU等）
+#include <WiFi.h>               // ESP32のWiFi接続ライブラリ
+#include <WiFiUdp.h>            // UDP通信ライブラリ
+#include <freertos/FreeRTOS.h>  // FreeRTOSマルチタスクの基本ライブラリ
+#include <freertos/semphr.h>    // FreeRTOSのセマフォ・ミューテックスライブラリ（排他制御用）
+#include <freertos/task.h>      // FreeRTOSのタスク管理ライブラリ
 
-// airi
-#define SERIAL_DEBUG_MODE
+// ※要確認: この行の意図が把握できていません
+#define SERIAL_DEBUG_MODE  // ※要確認: ESP32-TWAI-CANのインクルード前にdefineが必要な理由が把握できていません
 #define ENABLE_DISPLAY
 // #define UDP_LOG_MODE
 
-#include <ESP32-TWAI-CAN.hpp>
+#include <ESP32-TWAI-CAN.hpp>  // ESP32のCAN（TWAI）通信ライブラリ
 
 #include "wifi_config.h"  // WiFi設定を別ファイルから読み込み
 
-#define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力
+#define SERIAL_DEBUG_MODE  // CSV出力やシリアルプロッタ用の出力（※line 10で既に定義済み、再定義の意図が把握できていません）
 // #define DEV_DEBUG_MOE     // 開発用デバッグ出力（受信IDなど）
 #define WIFI_DEBUG_MODE  // WiFiスキャンとネットワーク情報の表示
 // #define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
 
-// Default for M5StickC PLUS2
-#define CAN_TX 32
-#define CAN_RX 33
+// AtomS3 Port A + M5Stack Unit CAN (U085)
+#define CAN_TX 2
+#define CAN_RX 1
 
-#define BASE_ID 0x204
+#define BASE_ID 0x204  // RoboMasterモーターのベースCAN受信ID（motor_id=1 → 受信ID=0x205）
 
-// コマンドの送信感覚
+// コマンドの送信間隔
 #define COMMAND_SEND_INTERVAL 20  // ms
-#define LOOP_INTERVAL 10
+#define LOOP_INTERVAL 10          // メインループの1回あたりの待機時間（ms）
 
-CanFrame rxFrame;
+CanFrame rxFrame;  // CAN受信フレームの一時格納バッファ
 
-WiFiUDP udp;
-WiFiUDP commandUdp;  // コマンド受信用
-bool wifiConnected = false;
+WiFiUDP udp;                   // センサーデータ送信用UDPソケット
+WiFiUDP commandUdp;            // コマンド受信用
+bool wifiConnected = false;    // WiFi接続済みフラグ（UDP送信の可否判断に使用）
 
 // const int RECEIVE_UDP_PORT = 8887;  // コマンド受信ポート
 
-int counter = 0;
-bool data_size_error_flag_ = false;
+int counter = 0;                     // CAN受信フレームのカウンタ（JSON送信に含める）
+bool data_size_error_flag_ = false;  // 受信データ長が8バイトでない場合のエラーフラグ
 
 // IMU data variables
 float accelX, accelY, accelZ;
@@ -59,7 +59,7 @@ static const float mapping_rpm[] = {
     0.00,   -0.00,  -0.01,  -0.02,  -0.09,  -1.30,  -3.35,  -4.91, -7.42,
     -10.29, -14.45, -20.66, -25.99, -31.43, -37.67, -51.54, -66.49};
 
-static const int mapping_size = sizeof(mapping_current) / sizeof(float);
+static const int mapping_size = sizeof(mapping_current) / sizeof(float);  // マッピングデータの総要素数（正方向18 + 負方向17 = 35）
 
 // RPMから電流値を線形補間で計算する関数
 float rpmToCurrent(float target_rpm) {
@@ -70,7 +70,7 @@ float rpmToCurrent(float target_rpm) {
   if (target_rpm > max_rpm) target_rpm = max_rpm;
   if (target_rpm < min_rpm) target_rpm = min_rpm;
 
-  // 0付近の不感帯処理
+  // 0付近の不感帯処理（0.1 RPM未満はゼロとみなす）
   if (abs(target_rpm) < 0.1) {
     return 0.0;
   }
@@ -78,7 +78,7 @@ float rpmToCurrent(float target_rpm) {
   // 正方向と負方向で分けて処理
   if (target_rpm > 0) {
     // 正方向の線形補間
-    for (int i = 0; i < 18; i++) {  // 正方向データは0-17番目
+    for (int i = 0; i < 18; i++) {  // 正方向データはインデックス0〜17
       if (mapping_rpm[i] >= target_rpm) {
         if (i == 0 || mapping_rpm[i - 1] == mapping_rpm[i]) {
           return mapping_current[i];
@@ -94,7 +94,7 @@ float rpmToCurrent(float target_rpm) {
     return mapping_current[17];  // 最大値
   } else {
     // 負方向の線形補間
-    for (int i = 18; i < mapping_size; i++) {  // 負方向データは18-34番目
+    for (int i = 18; i < mapping_size; i++) {  // 負方向データはインデックス18〜34
       if (mapping_rpm[i] <= target_rpm) {      // 負の値なので <=
         if (i == 18 || mapping_rpm[i - 1] == mapping_rpm[i]) {
           return mapping_current[i];
@@ -113,6 +113,7 @@ float rpmToCurrent(float target_rpm) {
 
 // 簡易的なRPM制御関数（PIDの代替）
 float simpleRpmControl(float current_rpm, float target_rpm) {
+  // ※これらの変数は現在未使用（PID拡張用として残されていると推測）
   static float integral_error = 0.0;
   static float previous_error = 0.0;
   static unsigned long last_time = 0;
@@ -138,7 +139,7 @@ float kd = 0.0;  // 微分ゲイン
 #endif
 
 // minimum current
-float min_current = 0.5;  // 最小出力しきい値（摩擦を超えるための値）
+float min_current = 0.5;  // 最小出力電流（A）：モーターの静止摩擦を超えるために必要な最低値
 
 // 0とみなす
 float zero_threshold = 0.05;
@@ -161,16 +162,16 @@ StaticJsonDocument<300> doc;
 StaticJsonDocument<200> commandDoc;  // コマンド受信用
 
 // UDP受信タスク用変数
-SemaphoreHandle_t udpDataMutex;
-bool newUdpDataAvailable = false;
+SemaphoreHandle_t udpDataMutex;          // UDPデータへのアクセスを排他制御するFreeRTOSミューテックス
+bool newUdpDataAvailable = false;        // 未処理の新規UDPデータが存在することを示すフラグ
 float latest_angular_velocity = 0.0;
 bool latest_is_running = false;
 bool latest_is_take = false;
 
 // 角度からRPM計算用（メモリ節約型）
-static float prev_angle = 0.0;
-static unsigned long prev_time = 0;
-static bool angle_calc_initialized = false;
+static float prev_angle = 0.0;               // 直前フレームのモーター角度（RPM計算に使用）
+static unsigned long prev_time = 0;          // 直前フレームのタイムスタンプ（ms）
+static bool angle_calc_initialized = false;  // 瞬間RPM計算の初回スキップフラグ
 
 // RPM移動平均フィルター（5点平均）
 #define RPM_FILTER_SIZE 5
@@ -178,7 +179,7 @@ static float rpm_buffer[RPM_FILTER_SIZE] = {0};
 static int rpm_buffer_idx = 0;
 static bool rpm_buffer_full = false;
 
-// UDP受信タスク
+// FreeRTOSタスク：UDPポートを常時監視してコマンドを受信する
 void udpReceiveTask(void *parameter) {
   while (true) {
     int packetSize = commandUdp.parsePacket();
@@ -195,7 +196,7 @@ void udpReceiveTask(void *parameter) {
         Serial.printf("Received Data: %s\n", incomingPacket);
 #endif
 
-        // JSONをパースJ
+        // JSONをパース
         DeserializationError receive_data =
             deserializeJson(commandDoc, incomingPacket);
         if (!receive_data) {
@@ -230,7 +231,7 @@ void processUdpCommand() {
   if (xSemaphoreTake(udpDataMutex, 0) == pdTRUE) {
     if (newUdpDataAvailable) {
       // 最新データを適用
-      target_rpm = latest_angular_velocity * 9.5493;  // rad/s を RPM に変換
+      target_rpm = latest_angular_velocity * 9.5493;  // rad/s → RPM に変換（1 rad/s = 60/(2π) ≒ 9.5493 RPM）
       is_take = latest_is_take;
       is_running = latest_is_running;
 
@@ -255,7 +256,7 @@ void processUdpCommand() {
   }
 }
 
-// 角度から瞬間RPMを計算（メモリ節約型）
+// 角度エンコーダの差分から瞬間RPMを算出（メモリ節約のため累積せず前回値のみ保持）
 float calculateInstantRpm(float current_angle, unsigned long current_time) {
   if (!angle_calc_initialized) {
     prev_angle = current_angle;
@@ -270,9 +271,9 @@ float calculateInstantRpm(float current_angle, unsigned long current_time) {
   // 角度差計算（360度リセット対策）
   float angle_diff = current_angle - prev_angle;
   if (angle_diff > 180.0)
-    angle_diff -= 360.0;  // 1°→359° の場合
+    angle_diff -= 360.0;  // 359°→0°方向の折り返しを補正
   else if (angle_diff < -180.0)
-    angle_diff += 360.0;  // 359°→1° の場合
+    angle_diff += 360.0;  // 0°→359°方向の折り返しを補正
 
   // 瞬間RPM計算: deg/ms * 1000ms/s * 60s/min / 360deg/rev
   float instant_rpm = (angle_diff / (float)time_diff) * 1000.0 * 60.0 / 360.0;
@@ -290,11 +291,11 @@ float applyRpmFilter(float new_rpm) {
   rpm_buffer_idx = (rpm_buffer_idx + 1) % RPM_FILTER_SIZE;
 
   if (!rpm_buffer_full && rpm_buffer_idx == 0) {
-    rpm_buffer_full = true;
+    rpm_buffer_full = true;  // バッファが初めて一周した時点でフルフラグを立てる
   }
 
   float sum = 0.0;
-  int count = rpm_buffer_full ? RPM_FILTER_SIZE : rpm_buffer_idx;
+  int count = rpm_buffer_full ? RPM_FILTER_SIZE : rpm_buffer_idx;  // バッファが未満杯の場合は現在のサンプル数で割る
   for (int i = 0; i < count; i++) {
     sum += rpm_buffer[i];
   }
@@ -310,9 +311,9 @@ float pid_control(float current_rpm, float target_rpm) {
   }
 
   unsigned long current_time = millis();
-  float dt = (current_time - last_pid_time) / 1000.0f;
+  float dt = (current_time - last_pid_time) / 1000.0f;  // 前回のPID実行からの経過時間（秒）
 
-  if (dt <= 0.0f) dt = 0.001f;
+  if (dt <= 0.0f) dt = 0.001f;  // dt=0による除算エラーを防ぐフォールバック
 
   // 誤差計算
   float error = target_rpm - current_rpm;
@@ -350,7 +351,7 @@ float pid_control(float current_rpm, float target_rpm) {
     integral_error += error * dt;
   }
 
-  float max_integral = 100.0f;
+  float max_integral = 100.0f;  // 積分ウィンドアップ防止の上限値
   if (integral_error > max_integral) integral_error = max_integral;
   if (integral_error < -max_integral) integral_error = -max_integral;
 
@@ -360,7 +361,7 @@ float pid_control(float current_rpm, float target_rpm) {
   // PID出力計算
   float output = kp * error + ki * integral_error + kd * derivative_error;
 
-  // フィードフォワード項（速度比例）
+  // フィードフォワード：目標RPMの0.5%を加算して定常偏差を補助
   float feedforward = target_rpm * 0.005f;
   output += feedforward;
 
@@ -396,13 +397,13 @@ void send_cur(float cur) {
   // CANフレーム作成
   CanFrame frame = {0};
   frame.identifier = CAN_ID;
-  frame.extd = 0;
+  frame.extd = 0;  // 標準フレーム（拡張フレームは不使用）
   frame.data_length_code = 8;
 
-  // 8バイト初期化（冗長だが明示的に）
+  // 未使用バイトを念のため0クリア
   for (int i = 0; i < 8; i++) frame.data[i] = 0;
 
-  // モーターIDに応じた位置に電流コマンドを格納
+  // モーターIDに対応するバイト位置に電流コマンドを格納（ID=1→0,1バイト目 / ID=2→2,3バイト目 ...）
   int byteIndex = (motor_id - 1) * 2;
   frame.data[byteIndex] = (command >> 8) & 0xFF;  // 上位バイト
   frame.data[byteIndex + 1] = command & 0xFF;     // 下位バイト
@@ -435,12 +436,12 @@ void readIMUData() {
   if (imu_update) {
     auto data = M5.Imu.getImuData();
 
-    // Get acceleration data (m/s^2)
+    // 加速度データを取得（単位: m/s²）
     accelX = data.accel.x;
     accelY = data.accel.y;
     accelZ = data.accel.z;
 
-    // Get gyroscope data (deg/s)
+    // 角速度データを取得（単位: deg/s）
     gyroX = data.gyro.x;
     gyroY = data.gyro.y;
     gyroZ = data.gyro.z;
@@ -449,12 +450,12 @@ void readIMUData() {
 
 void setup() {
   auto cfg = M5.config();
-  M5.begin(cfg);
-  M5.Display.setRotation(3);
-  M5.Display.setTextFont(&fonts::Orbitron_Light_24);
+  M5.begin(cfg);  // AtomS3を初期化
+  M5.Display.setRotation(3);  // ※要確認: 回転方向（3=横向き？）の正確な意味が把握できていません
+  M5.Display.setTextFont(&fonts::Orbitron_Light_24);  // フォント指定（Orbitron Light 24px）
   M5.Display.setTextSize(0.5);
 
-  // wait 2 seconds for M5StickC to initialize
+  // AtomS3初期化完了待ち（2秒）
   delay(2000);
 
 #ifdef SERIAL_DEBUG_MODE
@@ -523,7 +524,7 @@ void setup() {
   Serial.println(RECEIVE_UDP_PORT);
 #endif
 
-  // ミューテックス作成
+  // UDPデータ保護用ミューテックスを作成
   udpDataMutex = xSemaphoreCreateMutex();
 
   // UDP受信タスクを作成
@@ -539,12 +540,11 @@ void setup() {
   // Set pins
   ESP32Can.setPins(CAN_TX, CAN_RX);
 
-  // You can set custom size for the queues - those are default
+  // CAN送受信キューのサイズ設定（デフォルト値）
   ESP32Can.setRxQueueSize(5);
   ESP32Can.setTxQueueSize(5);
 
-  // .setSpeed() and .begin() functions require to use TwaiSpeed enum,
-  // but you can easily convert it from numerical value using .convertSpeed()
+  // CANバス速度を1Mbpsに設定
   ESP32Can.setSpeed(ESP32Can.convertSpeed(1000));
 
   // Initialize CAN bus
@@ -571,7 +571,7 @@ void loop() {
     // UDP コマンド受信処理
     processUdpCommand();
 
-// airi
+// ※要確認: この行の意図が把握できていません
 #ifdef ENABLE_DISPLAY
     M5.Display.fillScreen(BLACK);
     M5.Display.setCursor(0, 0);
@@ -638,7 +638,7 @@ void loop() {
 
       if (rxFrame.identifier == BASE_ID + motor_id) {  // motor_id=1なので0x205
         counter++;
-        data_size_error_flag_ = (rxFrame.data_length_code != 8);
+        data_size_error_flag_ = (rxFrame.data_length_code != 8);  // 受信データが8バイトでない場合はエラーフラグを立てる
 
         // CANからの生データ取得
         uint16_t mech_angle = (rxFrame.data[0] << 8) | rxFrame.data[1];
@@ -647,7 +647,7 @@ void loop() {
         uint8_t temp = rxFrame.data[6];
 
         // --- 正規化 ---
-        float angle_deg = mech_angle * 360.0f / 8192.0f;
+        float angle_deg = mech_angle * 360.0f / 8192.0f;  // 生の角度カウント（0〜8191）を0〜360°に変換
         float speed_rpm_raw = speed;  // モーターから直接取得したRPM
 
         // 角度から瞬間RPMを計算
@@ -658,9 +658,9 @@ void loop() {
 
         float speed_deg = -speed_rpm * 6.0f;  // 角度計算RPM -> deg/s変換 (RPM *
                                               // 360deg/60s = RPM * 6) 軸反転
-        float current_A = torque / 2048.0f;
+        float current_A = torque / 2048.0f;  // ※要確認: トルクカウント→電流(A)の変換係数（2048の根拠が把握できていません）
 
-        // PID制御のために角度計算RPMを使用
+        // PID制御に使用するRPMを移動平均後の値で更新
         current_rpm = speed_rpm;
 
         // モーターデータを追加
@@ -710,7 +710,7 @@ void loop() {
 
 #ifdef SERIAL_DEBUG_MODE
         // JSON形式での出力
-        if (!(i % 100)) {  // 出力頻度制限
+        if (!(i % 100)) {  // 100ループごとに1回だけシリアル出力（出力頻度制限）
           // JSONドキュメントを作成
 
           // JSONを出力
