@@ -8,12 +8,17 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-// airi
-#define SERIAL_DEBUG_MODE
+// Uncomment to enable status messages and JSON telemetry on USB serial.
+// #define SERIAL_LOG_MODE
 #define ENABLE_DISPLAY
 // #define UDP_LOG_MODE
 // #define DEV_DEBUG_MODE      // 開発用デバッグ出力（受信IDなど）
 // #define NO_LOAD_DEBUG_MODE  // 負荷なしデバッグ
+
+#ifndef SERIAL_LOG_MODE
+#undef UDP_LOG_MODE
+#undef DEV_DEBUG_MODE
+#endif
 
 #include <ESP32-TWAI-CAN.hpp>
 
@@ -195,7 +200,7 @@ void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
 
   switch (event) {
     case ARDUINO_EVENT_ETH_START:
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
       Serial.println("ETH Started");
 #endif
       ETH.setHostname("atoms3-eth");
@@ -203,7 +208,7 @@ void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
 
     case ARDUINO_EVENT_ETH_CONNECTED:
       lanLinkUp = true;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
       Serial.println("ETH Link Up");
 #endif
       break;
@@ -213,7 +218,7 @@ void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
       lanHasIP = true;
       networkReady = true;
       ethNeedsSocketSync = true;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
       Serial.print("ETH IP: ");
       Serial.println(ETH.localIP());
 #endif
@@ -223,7 +228,7 @@ void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
       lanHasIP = false;
       networkReady = false;
       ethNeedsSocketSync = true;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
       Serial.println("ETH Lost IP");
 #endif
       break;
@@ -233,7 +238,7 @@ void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
       lanHasIP = false;
       networkReady = false;
       ethNeedsSocketSync = true;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
       Serial.println("ETH Disconnected");
 #endif
       break;
@@ -243,7 +248,7 @@ void onNetworkEvent(arduino_event_id_t event, arduino_event_info_t info) {
       lanHasIP = false;
       networkReady = false;
       ethNeedsSocketSync = true;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
       Serial.println("ETH Stopped");
 #endif
       break;
@@ -261,7 +266,7 @@ void stopUdpSocketsUnlocked() {
   if (udpCommandServerStarted) {
     commandUdp.stop();
     udpCommandServerStarted = false;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("UDP command server stopped");
 #endif
   }
@@ -269,7 +274,7 @@ void stopUdpSocketsUnlocked() {
   if (udpSendSocketStarted) {
     udp.stop();
     udpSendSocketStarted = false;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("UDP sender socket stopped");
 #endif
   }
@@ -300,7 +305,7 @@ void startUdpSockets(const IPAddress& ip) {
   if (rxOk && txOk) {
     currentBoundIP = ip;
     ethNeedsSocketSync = false;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.print("UDP sockets bound on IP: ");
     Serial.println(ip);
     Serial.print("RX port: ");
@@ -310,7 +315,7 @@ void startUdpSockets(const IPAddress& ip) {
 #endif
   } else {
     ethNeedsSocketSync = true;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.print("UDP socket bind failed. RX=");
     Serial.print(rxOk ? "OK" : "NG");
     Serial.print(" TX=");
@@ -409,7 +414,7 @@ void udpReceiveTask(void* parameter) {
             xSemaphoreGive(udpDataMutex);
           }
         } else {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
           Serial.print("JSON parse receive_data: ");
           Serial.println(receive_data.c_str());
 #endif
@@ -429,7 +434,7 @@ void processUdpCommand() {
 
       newUdpDataAvailable = false;
 
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
       static unsigned long lastUdpDebugTime = 0;
       if (millis() - lastUdpDebugTime >= 1000) {
         Serial.print("UDP Command Applied - angular_velocity=");
@@ -507,7 +512,7 @@ float pid_control(float current_rpm, float target_rpm) {
   static float previous_target_rpm = target_rpm;
   if (abs(target_rpm - previous_target_rpm) > 0.5f) {
     integral_error = 0.0;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("Target changed - Integral reset");
 #endif
   }
@@ -520,7 +525,7 @@ float pid_control(float current_rpm, float target_rpm) {
 
   if (is_braking) {
     integral_error = 0.0;
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("Braking detected - Integral reset");
 #endif
   }
@@ -634,7 +639,7 @@ void updateDisplay() {
 }
 
 void setup() {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
   Serial.begin(115200);
   unsigned long serial_wait_start = millis();
   while (!Serial && (millis() - serial_wait_start < 2000)) {
@@ -656,7 +661,7 @@ void setup() {
   udpSocketMutex = xSemaphoreCreateMutex();
 
   if (udpDataMutex == NULL || udpSocketMutex == NULL) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("Failed to create UDP mutex");
 #endif
     while (1) {
@@ -674,13 +679,13 @@ void setup() {
 
   Network.onEvent(onNetworkEvent);
 
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
   Serial.println("Starting Ethernet (W5500 over SPI)...");
 #endif
 
   if (!ETH.begin(ETH_PHY_TYPE, ETH_PHY_ADDR, ETH_PHY_CS, ETH_PHY_IRQ,
                  ETH_PHY_RST, SPI)) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("ETH.begin() failed!");
 #endif
     while (1) {
@@ -692,7 +697,7 @@ void setup() {
   if (USE_STATIC_IP) {
     bool cfgOk = ETH.config(LOCAL_IP, LOCAL_GATEWAY, LOCAL_SUBNET, LOCAL_DNS1,
                             LOCAL_DNS2);
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.print("ETH.config(static IP) = ");
     Serial.println(cfgOk ? "OK" : "NG");
 #endif
@@ -719,7 +724,7 @@ void setup() {
     delay(50);
   }
 
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
   Serial.print("Ethernet local IP: ");
   Serial.println(ETH.localIP());
 #endif
@@ -731,12 +736,12 @@ void setup() {
   ESP32Can.setSpeed(ESP32Can.convertSpeed(1000));
 
   if (ESP32Can.begin()) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("CAN bus started!");
     Serial.println("JSON data output started");
 #endif
   } else {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
     Serial.println("CAN bus failed!");
 #endif
     while (1) {
@@ -769,7 +774,7 @@ void loop() {
     //       target_rpm = target_rpm_sequence[target_rpm_index];
     //       target_change_time = millis();
 
-    // #ifdef SERIAL_DEBUG_MODE
+    // #ifdef SERIAL_LOG_MODE
     //       Serial.print(">>> Target RPM changed to: ");
     //       Serial.print(target_rpm);
     //       Serial.print(" (");
@@ -870,12 +875,12 @@ void loop() {
           size_t jsonLen = serializeJson(doc, jsonBuffer, sizeof(jsonBuffer));
 
           if (jsonLen == 0 || jsonLen >= sizeof(jsonBuffer)) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
             Serial.println("serializeJson failed or buffer too small");
 #endif
           } else {
             if (!udp.beginPacket(UDP_TARGET_IP, POST_UDP_PORT)) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
               Serial.println("udp.beginPacket failed");
 #endif
               udpSendSocketStarted = false;
@@ -883,13 +888,13 @@ void loop() {
             } else {
               size_t written = udp.write((const uint8_t*)jsonBuffer, jsonLen);
               if (written != jsonLen) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
                 Serial.println("udp.write size mismatch");
 #endif
               }
 
               if (!udp.endPacket()) {
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
                 Serial.println("udp.endPacket failed");
 #endif
                 udpSendSocketStarted = false;
@@ -899,7 +904,7 @@ void loop() {
           }
         }
 
-#ifdef SERIAL_DEBUG_MODE
+#ifdef SERIAL_LOG_MODE
         if (!(i % 100)) {
           serializeJson(doc, Serial);
           Serial.println();

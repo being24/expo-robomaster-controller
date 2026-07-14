@@ -164,10 +164,11 @@ const uint16_t SEND_UDP_PORT = 9002;
 - `control.current_rpm`: 制御側で使用する5点移動平均RPM
 
 AtomS3の画面にはIP、LAN状態、目標RPM、瞬時RPM、状態フラグを表示します。
+モーターノードのシリアルログはデフォルトで無効です。`motor.ino`の`SERIAL_LOG_MODE`を定義すると、状態ログとJSONテレメトリーをシリアルコンソールへ出力します。
 
 ## MINITOF-90テレメトリー
 
-距離センサーノードは100ms間隔で`UDP_TARGET_IP:9011`へ送信します。同じJSONをシリアルコンソールにも出力します。
+距離センサーノードはFreeRTOSで計測、UDP送信、画面更新を独立したタスクとして実行します。計測とUDP送信は20ms間隔（約50Hz）で、`UDP_TARGET_IP:9011`へ送信します。シリアルログはデフォルトで無効です。`distance-sensor.ino`の`SERIAL_LOG_MODE`を定義すると、状態ログと同じJSONをシリアルコンソールにも出力します。
 
 ```json
 {
