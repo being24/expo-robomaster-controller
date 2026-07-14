@@ -154,6 +154,7 @@ bool is_running = false;
 bool is_take = false;
 float target_rpm = 0.0;
 float current_rpm = 0.0;
+float instant_rpm = 0.0;
 float integral_error = 0.0;
 float previous_error = 0.0;
 unsigned long last_pid_time = 0;
@@ -626,7 +627,7 @@ void updateDisplay() {
   M5.Display.printf("LAN: %s / %s\n", lanLinkUp ? "LINK" : "DOWN",
                     lanHasIP ? "IP OK" : "NO IP");
   M5.Display.printf("Target:  %.2f RPM\n", target_rpm);
-  M5.Display.printf("Current: %.2f RPM\n", current_rpm);
+  M5.Display.printf("Current: %.2f RPM\n", instant_rpm);
   M5.Display.printf("Running: %s\n", is_running ? "ON" : "OFF");
   M5.Display.printf("Is Take: %s\n", is_take ? "ON" : "OFF");
 
@@ -822,7 +823,7 @@ void loop() {
         float speed_rpm_raw = speed;  // モーターから直接取得したRPM
 
         // 角度から瞬間RPMを計算
-        float instant_rpm = calculateInstantRpm(angle_deg, millis());
+        instant_rpm = calculateInstantRpm(angle_deg, millis());
 
         // 移動平均フィルターを適用
         float speed_rpm = applyRpmFilter(instant_rpm);
