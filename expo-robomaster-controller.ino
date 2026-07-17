@@ -197,9 +197,28 @@ void sendTelemetry() {
 
 void updateDisplay() {
   const MeasurementState snapshot = getMeasurementSnapshot();
+  const bool hasError =
+      !snapshot.valid || !lanLinkUp || !lanHasIp || !udpStarted;
 
   M5.Display.startWrite();
   M5.Display.fillScreen(BLACK);
+
+  if (!hasError) {
+    // Normally show only the latest distance, large enough to read at a glance.
+    M5.Display.setTextDatum(middle_center);
+    M5.Display.setTextSize(5.0f);
+    M5.Display.drawNumber(snapshot.distanceMm, M5.Display.width() / 2,
+                          M5.Display.height() / 2 - 12);
+    M5.Display.setTextSize(2.0f);
+    M5.Display.drawString("mm", M5.Display.width() / 2,
+                          M5.Display.height() - 18);
+    M5.Display.endWrite();
+    return;
+  }
+
+  // On an error (including startup/reconnection), show the detailed status.
+  M5.Display.setTextDatum(top_left);
+  M5.Display.setTextSize(1.0f);
   M5.Display.setCursor(0, 0);
   M5.Display.println("MINITOF-90 UDP");
   M5.Display.printf("IP: %s\n", ETH.localIP().toString().c_str());
@@ -281,7 +300,7 @@ void setup() {
 
   auto config = M5.config();
   M5.begin(config);
-  M5.Display.setRotation(3);
+  M5.Display.setRotation(0);
   M5.Display.setTextSize(1.0f);
   M5.Display.setBrightness(DISPLAY_BRIGHTNESS);
 
