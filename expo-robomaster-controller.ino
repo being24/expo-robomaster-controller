@@ -300,7 +300,7 @@ void setup() {
 
   auto config = M5.config();
   M5.begin(config);
-  M5.Display.setRotation(0);
+  M5.Display.setRotation(2);
   M5.Display.setTextSize(1.0f);
   M5.Display.setBrightness(DISPLAY_BRIGHTNESS);
 
